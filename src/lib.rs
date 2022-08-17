@@ -1,9 +1,10 @@
-use std::{collections::HashMap, error::Error};
-use reqwest::Client;
+use std::{collections::HashMap, error::Error, env, path::Path, fs};
+use bee_api::{UploadConfig, BeeConfig};
 use serde::{Serialize, Deserialize};
 use indicatif::{ProgressBar, ProgressStyle};
-use tokio::stream;
 use tokio_stream::StreamExt;
+
+const FILE_PREFIX : &str = "f_";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum HerdStatus {
@@ -30,82 +31,109 @@ pub struct HerdIndexItem {
     pub status: HerdStatus,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SwarmReference {
-    pub reference: String,
+pub enum HerdMode {
+    Files,
+    Manifest,
+    Refresh,
 }
 
-pub struct SwarmUploadConfig {
+pub struct Config {
+    pub mode: HerdMode,
+    pub path: String,
+    pub db: String,
     pub stamp: String,
-    pub pin: Option<bool>,
-    // pub encrypt: Option<String>,
-    pub tag: Option<String>,
-    pub deferred: Option<bool>,
+    pub bee_api: String,
+    pub bee_debug_api: String,
 }
 
-// upload the data to the swarm
-async fn upload(client: Client, data: Vec<u8>, config: SwarmUploadConfig) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut headers = reqwest::header::HeaderMap::new();
-    // headers.insert("Content-Type", "application/octet-stream".parse().unwrap());
+impl Config {
+    pub fn new(matches: clap::ArgMatches) -> Result<Config, &'static str> {
+        let mode = match matches.value_of("mode").unwrap() {
+            "files" => HerdMode::Files,
+            "manifest" => HerdMode::Manifest,
+            "refresh" => HerdMode::Refresh,
+            _ => return Err("Invalid mode"),
+        };
+        let path = matches.value_of("path").unwrap().to_string();
 
-    // process the config
-    headers.insert("swarm-postage-batch-id", config.stamp.parse().unwrap());
-    if let Some(pin) = config.pin && pin {
-        headers.insert("swarm-pin", "true".parse().unwrap());
-    }
-    if let Some(tag) = config.tag {
-        headers.insert("swarm-tag", tag.parse().unwrap());
-    }
-    if let Some(deferred) = config.deferred && !deferred {
-        headers.insert("swarm-deferred", "false".parse().unwrap());
-    }
+        // return err if db is not set
+        let db = match env::var("BEE_HERDER_DB") {
+            Ok(val) => val,
+            Err(_) => return Err("Environment variable BEE_HERDER_DB must be set"),
+        };
 
-    let res = client
-        .post(format!("{}/bytes", "http://localhost:1633"))
-        .body(data)
-        .headers(headers)
-        .send()
-        .await?;
-    let reference = res.json::<SwarmReference>().await?;
-    Ok(reference.reference.as_bytes().to_vec())
+        // return err if stamp is not set
+        let stamp = match env::var("POSTAGE_BATCH") {
+            Ok(val) => val,
+            Err(_) => return Err("Environment variable POSTAGE_BATCH must be set"),
+        };
+
+        // return err if bee_api is not set
+        let bee_api = match env::var("BEE_API_URL") {
+            Ok(val) => val,
+            Err(_) => return Err("Environment variable BEE_API_URL must be set"),
+        };
+
+        // return err if bee_debug_api is not set
+        let bee_debug_api = match env::var("BEE_DEBUG_API_URL") {
+            Ok(val) => val,
+            Err(_) => return Err("Environment variable BEE_DEBUG_API_URL must be set"),
+        };
+
+        Ok(Config {
+            mode,
+            path,
+            db,
+            stamp,
+            bee_api,
+            bee_debug_api,
+        })
+    }
 }
 
-async fn list_to_be_completed() -> Result<(), Box<dyn Error>> {
+async fn files_upload(config: &Config) -> Result<(), Box<dyn Error>> {
+
+    println!("made it inside the files_upload");
     let client = reqwest::Client::new();
 
-    let db = sled::open("/tmp/wiki/db").expect("Failed to open database");
+    let db = sled::open(&config.db)?;
 
-    let db_iter = tokio_stream::iter(db.scan_prefix("f_".as_bytes()));
+    let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
     tokio::pin!(db_iter);
 
-    let mut items = db_iter
+    let mut to_upload = db_iter
         .map(|item| {
             let (key, value) = item.expect("Failed to read database");
-            let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
+            let file: HerdFile = bincode::deserialize(&value)
+                .expect("Failed to deserialize");
             (file, key)
         })
-        .filter(|(file, key)| file.status == HerdStatus::Pending);
+        .filter(|(file, _)| file.status == HerdStatus::Pending);
 
-    while let Some((file, key)) = items.next().await {
+    // consume the iterator
+    while let Some((file, key)) = to_upload.next().await {
         // read the file from the local filesystem
-        let root = "/tmp/wiki";
-        let path = std::path::Path::new(root).join(String::from_utf8(file.path.clone()).unwrap());
-        let data = std::fs::read(path).expect("Failed to read file");
+        let path = Path::new(&config.path).join(String::from_utf8(file.path.clone()).unwrap());
+        let data = fs::read(path).expect("Failed to read file");
 
         // upload the file to the swarm
-        let hash = upload(client.clone(), data, SwarmUploadConfig {
-            stamp: "0aec09d320b726a4a7d728a398eefb39939633e3e1badc136c45e956d48ab1c3".to_string(),
-            pin: Some(true),
-            tag: None,
-            deferred: Some(true),
-        }).await?;
+        let hash = bee_api::bytes_post(
+            client.clone(),
+            config.bee_api.clone(),
+            data, &
+            UploadConfig {
+                stamp: config.stamp.clone(),
+                pin: Some(true),
+                tag: None,
+                deferred: Some(true),
+            }).await?;
 
         // update the database
         let mut file = file;
         file.status = HerdStatus::Uploaded;
         file.tag = Some(0);
-        file.reference = Some(hash);
+        file.reference = Some(hash.ref_.as_bytes().to_vec());
         db.insert(key, bincode::serialize(&file).unwrap()).expect("Failed to update database");
 
         println!("Uploaded file: {:?}", file);
@@ -114,13 +142,27 @@ async fn list_to_be_completed() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+pub async fn run(config: Config) -> Result<(), Box<dyn Error>> {
+
+    println!("Made it inside of the run");
+
+    // if mode is files
+    match config.mode {
+        HerdMode::Files => files_upload(&config).await?,
+        HerdMode::Manifest => todo!(),
+        HerdMode::Refresh => todo!(),
+    };
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn it_works() {
-        println!("Hello, world!");
-        list_to_be_completed().await.unwrap();
-    }
+    // #[tokio::test]
+    // async fn it_works() {
+    //     println!("Hello, world!");
+    //     files_upload().await.unwrap();
+    // }
 }
