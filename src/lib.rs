@@ -1,4 +1,4 @@
-use bee_api::{BeeConfig, UploadConfig};
+use bee_api::UploadConfig;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, env, error::Error, fs, path::Path};
@@ -196,15 +196,4 @@ pub async fn run(config: Config) -> Result<(), Box<dyn Error + Send>> {
     };
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // #[tokio::test]
-    // async fn it_works() {
-    //     println!("Hello, world!");
-    //     files_upload().await.unwrap();
-    // }
 }
