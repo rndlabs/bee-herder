@@ -1,10 +1,14 @@
-use std::{collections::HashMap, error::Error, env, path::Path, fs};
-use bee_api::{UploadConfig, BeeConfig};
-use serde::{Serialize, Deserialize};
+use bee_api::{BeeConfig, UploadConfig};
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, env, error::Error, fs, path::Path};
+
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
-const FILE_PREFIX : &str = "f_";
+// type Result<T> = std::result::Result<T, Box<dyn error::Error + Send>>;
+
+const FILE_PREFIX: &str = "f_";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum HerdStatus {
@@ -91,64 +95,102 @@ impl Config {
     }
 }
 
-async fn files_upload(config: &Config) -> Result<(), Box<dyn Error>> {
-
-    println!("made it inside the files_upload");
+async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     let client = reqwest::Client::new();
 
-    let db = sled::open(&config.db)?;
+    // log the start time of the upload
+    let start = std::time::Instant::now();
 
+    let db = sled::open(&config.db).unwrap();
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
-    tokio::pin!(db_iter);
+    let (tx, rx) = mpsc::channel(100);
 
-    let mut to_upload = db_iter
-        .map(|item| {
-            let (key, value) = item.expect("Failed to read database");
-            let file: HerdFile = bincode::deserialize(&value)
-                .expect("Failed to deserialize");
-            (file, key)
-        })
-        .filter(|(file, _)| file.status == HerdStatus::Pending);
+    let pb = ProgressBar::new(50000 as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
+        .progress_chars("#>-"));
 
-    // consume the iterator
-    while let Some((file, key)) = to_upload.next().await {
-        // read the file from the local filesystem
-        let path = Path::new(&config.path).join(String::from_utf8(file.path.clone()).unwrap());
-        let data = fs::read(path).expect("Failed to read file");
+    // create a sync channel for processing completed items
+    let handle = tokio::spawn(async move {
+        // convert rx to a ReceiverStream
+        let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
+        // consume the channel
+        while let Some(result) = rx.next().await {
+            match result {
+                Ok((file, key)) => {
+                    // write the file to the database
+                    let value = bincode::serialize(&file).expect("Failed to serialize");
+                    db.insert(key, value).expect("Failed to write to database");
+                }
+                Err(e) => {
+                    println!("{}", e);
+                }
+            }
+            pb.inc(1);
+        }
 
-        // upload the file to the swarm
-        let hash = bee_api::bytes_post(
-            client.clone(),
-            config.bee_api.clone(),
-            data, &
-            UploadConfig {
-                stamp: config.stamp.clone(),
-                pin: Some(true),
-                tag: None,
-                deferred: Some(true),
-            }).await?;
+        pb.finish_with_message(format!("Upload done in {}s", start.elapsed().as_secs()));
+    });
 
-        // update the database
-        let mut file = file;
-        file.status = HerdStatus::Uploaded;
-        file.tag = Some(0);
-        file.reference = Some(hash.ref_.as_bytes().to_vec());
-        db.insert(key, bincode::serialize(&file).unwrap()).expect("Failed to update database");
+    let compute = tokio::spawn(async move {
+        tokio::pin!(db_iter);
+        let mut to_upload = db_iter
+            .map(|item| {
+                let (key, value) = item.expect("Failed to read database");
+                let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
+                (file, key)
+            })
+            .filter(|(file, _)| file.status == HerdStatus::Pending);
 
-        println!("Uploaded file: {:?}", file);
-    }
-    
+        // consume the iterator
+        while let Some((file, key)) = to_upload.next().await {
+            // read the file from the local filesystem
+            let path = Path::new(&config.path).join(String::from_utf8(file.path.clone()).unwrap());
+            let data = fs::read(path).expect("Failed to read file");
+
+            // upload the file to the swarm
+            let hash = bee_api::bytes_post(
+                client.clone(),
+                config.bee_api.clone(),
+                data,
+                &UploadConfig {
+                    stamp: config.stamp.clone(),
+                    pin: Some(true),
+                    tag: None,
+                    deferred: Some(true),
+                },
+            )
+            .await;
+
+            // set the hash in herdfile and return it to the channel
+            // or return an error if the upload failed
+            match hash {
+                Ok(hash) => {
+                    let mut file = file;
+                    file.status = HerdStatus::Uploaded;
+                    file.reference = Some(hex::decode(hash.ref_).unwrap());
+                    tx.send(Ok((file, key))).await.expect("Failed to send to channel");
+                }
+                Err(e) => {
+                    tx.send(Err(e)).await.unwrap();
+                }
+            }
+        }
+    });
+
+    handle.await.unwrap();
+    compute.await.unwrap();
+
     Ok(())
 }
 
-pub async fn run(config: Config) -> Result<(), Box<dyn Error>> {
-
+pub async fn run(config: Config) -> Result<(), Box<dyn Error + Send>> {
     println!("Made it inside of the run");
 
     // if mode is files
     match config.mode {
-        HerdMode::Files => files_upload(&config).await?,
+        HerdMode::Files => files_upload(config).await?,
         HerdMode::Manifest => todo!(),
         HerdMode::Refresh => todo!(),
     };

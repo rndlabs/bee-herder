@@ -26,14 +26,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .takes_value(true)
                 .required(true),
         )
-        .after_long_help("Environment variables: \n
+        .after_long_help(
+            "Environment variables: \n
   - BEE_API_URL:        API URL for uploading to Swarm \n
   - BEE_DEBUG_API_URL:  Debug API URL for Swarm \n
   - POSTAGE_BATCH:      Stamp to be used for uploading to Swarm \n
-  - BEE_HERDER_DB:      The path to the leveldb database for co-ordinating")
+  - BEE_HERDER_DB:      The path to the leveldb database for co-ordinating",
+        )
         .get_matches();
     // TODO: Write detailed usage instructions
-    // 
+    //
 
     let config = Config::new(matches).unwrap_or_else(|err| {
         eprintln!("Problem parsing configuration variables: {}", err);
