@@ -1,6 +1,6 @@
+use bee_herder::{run, Config};
 use clap::{App, Arg};
 use std::{error::Error, process};
-use bee_herder::{run, Config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

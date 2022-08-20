@@ -10,7 +10,7 @@ use tokio_stream::StreamExt;
 
 const FILE_PREFIX: &str = "f_";
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HerdStatus {
     Pending,
     Uploaded,
@@ -20,8 +20,8 @@ pub enum HerdStatus {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HerdFile {
-    pub path: Vec<u8>,
-    pub prefix: Vec<u8>,
+    pub file_path: String,
+    pub prefix: String,
     pub status: HerdStatus,
     pub tag: Option<u64>,
     pub reference: Option<Vec<u8>>,
@@ -104,9 +104,22 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     let db = sled::open(&config.db).unwrap();
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
+    // read current number of pending entries
+    let mut num_pending = match db.get(bincode::serialize(&HerdStatus::Pending).unwrap()).unwrap() {
+        Some(b) => bincode::deserialize(&b).unwrap(),
+        None => 0,
+    };
+
+    // read current number of pending entries
+    let mut num_uploaded = match db.get(bincode::serialize(&HerdStatus::Uploaded).unwrap()).unwrap() {
+        Some(b) => bincode::deserialize(&b).unwrap(),
+        None => 0,
+    };
+    
+
     let (tx, rx) = mpsc::channel(100);
 
-    let pb = ProgressBar::new(50000 as u64);
+    let pb = ProgressBar::new(num_pending);
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
@@ -115,20 +128,40 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     let handle = tokio::spawn(async move {
         // convert rx to a ReceiverStream
         let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
+        // prepare a batch for writing to the database to minimise IOPS
+        let mut batch = sled::Batch::default();
         // consume the channel
+        let mut count = 0;
         while let Some(result) = rx.next().await {
             match result {
                 Ok((file, key)) => {
                     // write the file to the database
                     let value = bincode::serialize(&file).expect("Failed to serialize");
-                    db.insert(key, value).expect("Failed to write to database");
+                    batch.insert(key, value);
                 }
                 Err(e) => {
                     println!("{}", e);
                 }
             }
+            
+            count += 1;
+            if count % 1000 == 0 {
+                num_pending -= count;
+                num_uploaded += count;
+                batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&num_pending).unwrap());
+                batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap());
+                db.apply_batch(batch).expect("Failed to apply batch");
+                batch = sled::Batch::default();
+            }
+
             pb.inc(1);
         }
+
+        num_pending -= count;
+        num_uploaded += count;
+        batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&num_pending).unwrap());
+        batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap());
+        db.apply_batch(batch).expect("Failed to apply batch");
 
         pb.finish_with_message(format!("Upload done in {}s", start.elapsed().as_secs()));
     });
@@ -146,7 +179,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         // consume the iterator
         while let Some((file, key)) = to_upload.next().await {
             // read the file from the local filesystem
-            let path = Path::new(&config.path).join(String::from_utf8(file.path.clone()).unwrap());
+            let path = Path::new(&config.path).join(file.file_path.clone());
             let data = fs::read(path).expect("Failed to read file");
 
             // upload the file to the swarm
@@ -170,7 +203,9 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
                     let mut file = file;
                     file.status = HerdStatus::Uploaded;
                     file.reference = Some(hex::decode(hash.ref_).unwrap());
-                    tx.send(Ok((file, key))).await.expect("Failed to send to channel");
+                    tx.send(Ok((file, key)))
+                        .await
+                        .expect("Failed to send to channel");
                 }
                 Err(e) => {
                     tx.send(Err(e)).await.unwrap();
@@ -186,8 +221,6 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
 }
 
 pub async fn run(config: Config) -> Result<(), Box<dyn Error + Send>> {
-    println!("Made it inside of the run");
-
     // if mode is files
     match config.mode {
         HerdMode::Files => files_upload(config).await?,
