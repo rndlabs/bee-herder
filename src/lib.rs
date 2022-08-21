@@ -23,7 +23,7 @@ pub struct HerdFile {
     pub file_path: String,
     pub prefix: String,
     pub status: HerdStatus,
-    pub tag: Option<u64>,
+    pub tag: Option<u32>,
     pub reference: Option<Vec<u8>>,
     pub mantaray_reference: Option<Vec<u8>>,
     pub metadata: HashMap<String, String>,
@@ -117,6 +117,8 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     };
     
 
+    tag_index_generator(&db, &client, &config).await?;
+
     let (tx, rx) = mpsc::channel(100);
 
     let pb = ProgressBar::new(num_pending);
@@ -190,7 +192,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
                 &UploadConfig {
                     stamp: config.stamp.clone(),
                     pin: Some(true),
-                    tag: None,
+                    tag: file.tag,
                     deferred: Some(true),
                 },
             )
@@ -215,8 +217,73 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     });
 
     handle.await.unwrap();
-    compute.await.unwrap();
 
+// generate a tags in batches.
+// just iterate over the files and generate a tag for each 100 files
+async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &Config) -> Result<(), Box<dyn std::error::Error + Send>> {
+    // attempt to retrieve the hashmap from the db
+    let index: Vec<u32> = match db.get("cluster_to_tag_index") {
+        Ok(Some(index)) => {
+            // if it exists, deserialize it
+            bincode::deserialize(&index).unwrap()
+        }
+        _ => {
+            let pb = ProgressBar::new(100);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
+                .progress_chars("#>-"));
+            
+            pb.set_message("Generating tags");
+
+            // otherwise, create a new one
+            let mut index = vec![0; 100];
+
+            // using the bee api, create 100 tags
+            for i in 0..100 {
+                let tag = bee_api::tag_post(client, config.bee_api.clone()).await.unwrap();
+                index[i] = tag.uid;
+                pb.inc(1);
+            }
+
+            pb.finish_with_message("Tags generated");
+            index
+        }
+    };
+
+    // create a batch to write the index to the database
+    let mut batch = sled::Batch::default();
+    batch.insert("cluster_to_tag_index", bincode::serialize(&index).unwrap());
+
+    // files start with the f_ prefix in the database
+    // get all files from the sled database that are of status pending and do not have a tag
+    db
+        .scan_prefix(FILE_PREFIX.as_bytes())
+        .filter_map(|item| {
+
+            let (key, value) = item.expect("Failed to read database");
+            let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
+            if file.status == HerdStatus::Pending && file.tag.is_none() {
+                Some((file, key))
+            } else {
+                None
+            }
+        })
+        // enumerate the files so we can get the index
+        .enumerate()
+        // map the files to a new tag based on the index
+        .map(|(i, (file, key))| {
+            let mut file = file;
+            let tag = index[i % 100];
+            file.tag = Some(tag);
+            (file, key)
+        })
+        // for each file, update the database
+        .for_each(|(file, key)| {
+            batch.insert(key, bincode::serialize(&file).unwrap());
+        });
+
+    // write the batch to the database
+    db.apply_batch(batch).expect("Failed to apply batch");
     Ok(())
 }
 
