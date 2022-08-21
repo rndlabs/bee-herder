@@ -1,7 +1,7 @@
 use bee_api::UploadConfig;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, error::Error, fs, path::Path};
+use std::{collections::HashMap, env, error::Error, fs};
 
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -105,17 +105,28 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
     // read current number of pending entries
-    let mut num_pending = match db.get(bincode::serialize(&HerdStatus::Pending).unwrap()).unwrap() {
+    let num_pending = match db
+        .get(bincode::serialize(&HerdStatus::Pending).unwrap())
+        .unwrap()
+    {
         Some(b) => bincode::deserialize(&b).unwrap(),
         None => 0,
     };
 
     // read current number of pending entries
-    let mut num_uploaded = match db.get(bincode::serialize(&HerdStatus::Uploaded).unwrap()).unwrap() {
+    let num_uploaded = match db
+        .get(bincode::serialize(&HerdStatus::Uploaded).unwrap())
+        .unwrap()
+    {
         Some(b) => bincode::deserialize(&b).unwrap(),
         None => 0,
     };
     
+    // if number of pending entries is 0, then we are done
+    if num_pending == 0 {
+        println!("No pending entries to upload");
+        return Ok(());
+    }
 
     tag_index_generator(&db, &client, &config).await?;
 
@@ -127,6 +138,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         .progress_chars("#>-"));
 
     // create a sync channel for processing completed items
+    let sync_thread_db = db.clone();
     let handle = tokio::spawn(async move {
         // convert rx to a ReceiverStream
         let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -148,28 +160,48 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
             
             count += 1;
             if count % 1000 == 0 {
-                num_pending -= count;
-                num_uploaded += count;
-                batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&num_pending).unwrap());
-                batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap());
-                db.apply_batch(batch).expect("Failed to apply batch");
+                batch.insert(
+                    bincode::serialize(&HerdStatus::Pending).unwrap(),
+                    bincode::serialize(&(num_pending - count)).unwrap(),
+                );
+                batch.insert(
+                    bincode::serialize(&HerdStatus::Uploaded).unwrap(),
+                    bincode::serialize(&(num_uploaded + count)).unwrap(),
+                );
+                sync_thread_db.apply_batch(batch).expect("Failed to apply batch");
                 batch = sled::Batch::default();
             }
 
             pb.inc(1);
         }
 
-        num_pending -= count;
-        num_uploaded += count;
-        batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&num_pending).unwrap());
-        batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap());
-        db.apply_batch(batch).expect("Failed to apply batch");
+        // write the final batch
+        if num_pending - count > 0 {
+            batch.insert(
+                bincode::serialize(&HerdStatus::Pending).unwrap(),
+                bincode::serialize(&(num_pending - count)).unwrap(),
+            );
+        } else {
+            batch.remove(bincode::serialize(&HerdStatus::Pending).unwrap());
+        }
+
+        if num_uploaded + count > 0 {
+            batch.insert(
+                bincode::serialize(&HerdStatus::Uploaded).unwrap(),
+                bincode::serialize(&(num_uploaded + count)).unwrap(),
+            );
+        } else {
+            batch.remove(bincode::serialize(&HerdStatus::Uploaded).unwrap());
+        }
+
+        sync_thread_db.apply_batch(batch).expect("Failed to apply batch");
 
         pb.finish_with_message(format!("Upload done in {}s", start.elapsed().as_secs()));
     });
 
-    let compute = tokio::spawn(async move {
+    let uploader = tokio::spawn(async move {
         tokio::pin!(db_iter);
+
         let mut to_upload = db_iter
             .map(|item| {
                 let (key, value) = item.expect("Failed to read database");
@@ -181,8 +213,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         // consume the iterator
         while let Some((file, key)) = to_upload.next().await {
             // read the file from the local filesystem
-            let path = Path::new(&config.path).join(file.file_path.clone());
-            let data = fs::read(path).expect("Failed to read file");
+            let data = fs::read(file.file_path.clone()).expect("Failed to read file");
 
             // upload the file to the swarm
             let hash = bee_api::bytes_post(
@@ -217,6 +248,10 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     });
 
     handle.await.unwrap();
+    uploader.await.unwrap();
+
+    Ok(())
+}
 
 // generate a tags in batches.
 // just iterate over the files and generate a tag for each 100 files
