@@ -114,6 +114,10 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     let start = std::time::Instant::now();
 
     let db = sled::open(&config.db).unwrap();
+
+    // first generate the tag index
+    tag_index_generator(&db, &client, &config).await?;
+
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
     // read current number of pending entries
@@ -140,8 +144,6 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         return Ok(());
     }
 
-    tag_index_generator(&db, &client, &config).await?;
-
     let (tx, rx) = mpsc::channel(100);
 
     let pb = ProgressBar::new(num_pending);
@@ -151,13 +153,14 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
 
     // create a sync channel for processing completed items
     let sync_thread_db = db.clone();
-    let handle = tokio::spawn(async move {
+    let director = tokio::spawn(async move {
         // convert rx to a ReceiverStream
         let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
         // prepare a batch for writing to the database to minimise IOPS
         let mut batch = sled::Batch::default();
         // consume the channel
         let mut count = 0;
+        let mut failed = 0;
         while let Some(result) = rx.next().await {
             match result {
                 Ok((file, key)) => {
@@ -167,11 +170,12 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
                 }
                 Err(e) => {
                     println!("{}", e);
+                    failed += 1;
                 }
             }
             
             count += 1;
-            if count % 1000 == 0 {
+            if count % 500 == 0 {
                 batch.insert(
                     bincode::serialize(&HerdStatus::Pending).unwrap(),
                     bincode::serialize(&(num_pending - count)).unwrap(),
@@ -208,7 +212,8 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
 
         sync_thread_db.apply_batch(batch).expect("Failed to apply batch");
 
-        pb.finish_with_message(format!("Upload done in {}s", start.elapsed().as_secs()));
+        // finish with number of files uploaded, and number of files failed in number of seconds
+        pb.finish_with_message(format!("{} files uploaded, {} failed in {} seconds", count, failed, start.elapsed().as_secs()));
     });
 
     let lim = RateLimiter::direct(Quota::per_second(NonZeroU32::new(config.upload_rate).unwrap()));
@@ -263,7 +268,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         }
     });
 
-    handle.await.unwrap();
+    director.await.unwrap();
     uploader.await.unwrap();
 
     Ok(())
