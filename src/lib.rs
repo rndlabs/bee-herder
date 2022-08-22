@@ -296,6 +296,9 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
                 pb.inc(1);
             }
 
+            // write the index to the database
+            db.insert("cluster_to_tag_index", bincode::serialize(&index).unwrap()).unwrap();
+
             pb.finish_with_message("Tags generated");
             index
         }
@@ -303,11 +306,27 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
 
     // create a batch to write the index to the database
     let mut batch = sled::Batch::default();
-    batch.insert("cluster_to_tag_index", bincode::serialize(&index).unwrap());
+
+    // get starting time
+    let start = std::time::Instant::now();
+
+    // get number of pending files
+    let num_pending = match db.get(bincode::serialize(&HerdStatus::Pending).unwrap()) {
+        Ok(Some(num)) => bincode::deserialize(&num).unwrap(),
+        _ => 0,
+    };
+
+    let pb = ProgressBar::new(num_pending);
+
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
+        .progress_chars("#>-"));
+    
+    pb.set_message("Tagging files");
 
     // files start with the f_ prefix in the database
     // get all files from the sled database that are of status pending and do not have a tag
-    db
+    let files = db
         .scan_prefix(FILE_PREFIX.as_bytes())
         .filter_map(|item| {
 
@@ -326,15 +345,25 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
             let mut file = file;
             let tag = index[i % 100];
             file.tag = Some(tag);
-            (file, key)
-        })
-        // for each file, update the database
-        .for_each(|(file, key)| {
-            batch.insert(key, bincode::serialize(&file).unwrap());
+            (i, file, key)
         });
 
-    // write the batch to the database
+    // write the tagged files to the database
+    for (i, file, key) in files {
+        batch.insert(key, bincode::serialize(&file).unwrap());
+
+        if i % 1000 == 0 {
     db.apply_batch(batch).expect("Failed to apply batch");
+            batch = sled::Batch::default();
+        }
+
+        pb.inc(1);
+    }
+
+    db.apply_batch(batch).expect("Failed to apply batch");
+
+    // finish the progress bar with number of items processed and time elapsed
+    pb.finish_with_message(format!("Tagged {} files in {:?}", num_pending, start.elapsed()));
     Ok(())
 }
 
