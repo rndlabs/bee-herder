@@ -1,7 +1,8 @@
 use bee_api::UploadConfig;
+use governor::{RateLimiter, Quota};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, error::Error, fs};
+use std::{collections::HashMap, env, error::Error, fs, num::NonZeroU32};
 
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -48,6 +49,7 @@ pub struct Config {
     pub stamp: String,
     pub bee_api: String,
     pub bee_debug_api: String,
+    pub upload_rate: u32,
 }
 
 impl Config {
@@ -84,6 +86,15 @@ impl Config {
             Err(_) => return Err("Environment variable BEE_DEBUG_API_URL must be set"),
         };
 
+        let upload_rate = match env::var("UPLOAD_RATE") {
+            // parse as u32 or return err
+            Ok(val) => match val.parse::<u32>() {
+                Ok(val) => val,
+                Err(_) => return Err("Environment variable UPLOAD_RATE must be a number"),
+            },
+            Err(_) => 50,
+        };
+
         Ok(Config {
             mode,
             path,
@@ -91,6 +102,7 @@ impl Config {
             stamp,
             bee_api,
             bee_debug_api,
+            upload_rate,
         })
     }
 }
@@ -199,6 +211,8 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         pb.finish_with_message(format!("Upload done in {}s", start.elapsed().as_secs()));
     });
 
+    let lim = RateLimiter::direct(Quota::per_second(NonZeroU32::new(config.upload_rate).unwrap()));
+
     let uploader = tokio::spawn(async move {
         tokio::pin!(db_iter);
 
@@ -214,6 +228,8 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         while let Some((file, key)) = to_upload.next().await {
             // read the file from the local filesystem
             let data = fs::read(file.file_path.clone()).expect("Failed to read file");
+
+            lim.until_ready().await;
 
             // upload the file to the swarm
             let hash = bee_api::bytes_post(

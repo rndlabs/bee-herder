@@ -16,3 +16,5 @@ serde = { version = "1.0.143", features = ["derive"] }
 tokio = { version = "1.20.1", features = ["full"] }
 tokio-stream = "0.1.9"
 bee_api = { path = "../bee_api" }
+mantaray = { path = "../mantaray" }
+governor = "0.4.2"
