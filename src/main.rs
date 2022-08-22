@@ -31,8 +31,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
   - BEE_API_URL:        API URL for uploading to Swarm \n
   - BEE_DEBUG_API_URL:  Debug API URL for Swarm \n
   - POSTAGE_BATCH:      Stamp to be used for uploading to Swarm \n
-  - BEE_HERDER_DB:      The path to the leveldb database for co-ordinating",
-        )
+  - BEE_HERDER_DB:      The path to the leveldb database for co-ordinating \n
+  - UPLOAD_RATE:        The rate at which to upload files to Swarm (files per second) \n
+  - NODE_ID:            When multi-node uploading, specify the node ID to use \n
+  - NODE_COUNT:         When multi-node uploading, specify the number of nodes")
         .get_matches();
     // TODO: Write detailed usage instructions
     //

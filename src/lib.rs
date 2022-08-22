@@ -50,6 +50,8 @@ pub struct Config {
     pub bee_api: String,
     pub bee_debug_api: String,
     pub upload_rate: u32,
+    pub node_id: u32,
+    pub node_count: u32,
 }
 
 impl Config {
@@ -95,6 +97,24 @@ impl Config {
             Err(_) => 50,
         };
 
+        let node_id = match env::var("NODE_ID") {
+            // parse as u32 or return err
+            Ok(val) => match val.parse::<u32>() {
+                Ok(val) => val,
+                Err(_) => return Err("Environment variable NODE_ID must be a number"),
+            },
+            Err(_) => 0,
+        };
+
+        let node_count = match env::var("NODE_COUNT") {
+            // parse as u32 or return err
+            Ok(val) => match val.parse::<u32>() {
+                Ok(val) => val,
+                Err(_) => return Err("Environment variable NODE_COUNT must be a number"),
+            },
+            Err(_) => 1,
+        };
+
         Ok(Config {
             mode,
             path,
@@ -103,6 +123,8 @@ impl Config {
             bee_api,
             bee_debug_api,
             upload_rate,
+            node_id,
+            node_count
         })
     }
 }
@@ -117,8 +139,6 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
 
     // first generate the tag index
     tag_index_generator(&db, &client, &config).await?;
-
-    let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
     // read current number of pending entries
     let num_pending = match db
@@ -219,18 +239,36 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     let lim = RateLimiter::direct(Quota::per_second(NonZeroU32::new(config.upload_rate).unwrap()));
 
     let uploader = tokio::spawn(async move {
+
+        // set the node index and number of nodes uploading
+        let node_id = config.node_id;
+        let node_count = config.node_count;
+
+        let offset = 2 + config.path.len() + 1;
+
+        for i in 0..node_count {
+            let idx = (node_id + i) % node_count;
+            println!("Node {} uploading", idx);
+
+            let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
         tokio::pin!(db_iter);
 
         let mut to_upload = db_iter
             .map(|item| {
                 let (key, value) = item.expect("Failed to read database");
                 let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
-                (file, key)
+                // decode the key as a string and strip the first two characters
+                let key_u32 = String::from_utf8(key.to_vec()).expect("Failed to decode key");
+                let key_u32 = (&key_u32[offset..]).to_string().parse::<u32>().unwrap();
+                (file, key, key_u32)
             })
-            .filter(|(file, _)| file.status == HerdStatus::Pending);
+            // decode key as u32 and filter out files that have already been uploaded
+            .filter(|(file, _, key_u32)| {
+                file.status == HerdStatus::Pending &&  key_u32 % node_count == idx
+            });
 
         // consume the iterator
-        while let Some((file, key)) = to_upload.next().await {
+            while let Some((file, key, _)) = to_upload.next().await {
             // read the file from the local filesystem
             let data = fs::read(file.file_path.clone()).expect("Failed to read file");
 
@@ -265,6 +303,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
                     tx.send(Err(e)).await.unwrap();
                 }
             }
+        }
         }
     });
 
