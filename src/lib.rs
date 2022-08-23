@@ -266,7 +266,12 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
             })
             // decode key as u32 and filter out files that have already been uploaded
             .filter(|(file, _, key_u32)| {
-                file.status == HerdStatus::Pending &&  key_u32 % node_count == idx
+                    file.status == HerdStatus::Pending && 
+                        key_u32 % node_count == idx &&
+                        file.metadata
+                            .get("Content-Type")
+                            .map(|ct| ct != "application/octet-stream+xapian")
+                            .unwrap_or(true)
             });
 
         // consume the iterator
