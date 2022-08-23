@@ -272,10 +272,14 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         // consume the iterator
             while let Some((file, key, _)) = to_upload.next().await {
             // read the file from the local filesystem
+                // print file path being processed
+                println!("Uploading {}", &file.file_path);
                 let mut tokio_file = File::open(file.file_path.clone()).await.unwrap();
 
                 let mut data = vec![];
                 tokio_file.read_to_end(&mut data).await.unwrap();
+
+                drop(tokio_file);
 
             lim.until_ready().await;
 
