@@ -6,6 +6,8 @@ use std::{collections::HashMap, env, error::Error, fs, num::NonZeroU32};
 
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt; // for read_to_end()
 
 // type Result<T> = std::result::Result<T, Box<dyn error::Error + Send>>;
 
@@ -270,7 +272,10 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         // consume the iterator
             while let Some((file, key, _)) = to_upload.next().await {
             // read the file from the local filesystem
-            let data = fs::read(file.file_path.clone()).expect("Failed to read file");
+                let mut tokio_file = File::open(file.file_path.clone()).await.unwrap();
+
+                let mut data = vec![];
+                tokio_file.read_to_end(&mut data).await.unwrap();
 
             lim.until_ready().await;
 
