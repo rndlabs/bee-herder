@@ -126,7 +126,7 @@ impl Config {
             bee_debug_api,
             upload_rate,
             node_id,
-            node_count
+            node_count,
         })
     }
 }
@@ -159,7 +159,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         Some(b) => bincode::deserialize(&b).unwrap(),
         None => 0,
     };
-    
+
     // if number of pending entries is 0, then we are done
     if num_pending == 0 {
         println!("No pending entries to upload");
@@ -195,7 +195,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
                     failed += 1;
                 }
             }
-            
+
             count += 1;
             if count % 500 == 0 {
                 batch.insert(
@@ -206,7 +206,9 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
                     bincode::serialize(&HerdStatus::Uploaded).unwrap(),
                     bincode::serialize(&(num_uploaded + count)).unwrap(),
                 );
-                sync_thread_db.apply_batch(batch).expect("Failed to apply batch");
+                sync_thread_db
+                    .apply_batch(batch)
+                    .expect("Failed to apply batch");
                 batch = sled::Batch::default();
             }
 
@@ -232,10 +234,17 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
             batch.remove(bincode::serialize(&HerdStatus::Uploaded).unwrap());
         }
 
-        sync_thread_db.apply_batch(batch).expect("Failed to apply batch");
+        sync_thread_db
+            .apply_batch(batch)
+            .expect("Failed to apply batch");
 
         // finish with number of files uploaded, and number of files failed in number of seconds
-        pb.finish_with_message(format!("{} files uploaded, {} failed in {} seconds", count, failed, start.elapsed().as_secs()));
+        pb.finish_with_message(format!(
+            "{} files uploaded, {} failed in {} seconds",
+            count,
+            failed,
+            start.elapsed().as_secs()
+        ));
     });
 
     let lim = RateLimiter::direct(Quota::per_second(
@@ -243,7 +252,6 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
     ));
 
     let uploader = tokio::spawn(async move {
-
         // set the node index and number of nodes uploading
         let node_id = config.node_id;
         let node_count = config.node_count;
@@ -255,30 +263,31 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
             println!("Node {} uploading", idx);
 
             let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
-        tokio::pin!(db_iter);
+            tokio::pin!(db_iter);
 
-        let mut to_upload = db_iter
-            .map(|item| {
-                let (key, value) = item.expect("Failed to read database");
-                let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
-                // decode the key as a string and strip the first two characters
-                let key_u32 = String::from_utf8(key.to_vec()).expect("Failed to decode key");
-                let key_u32 = (&key_u32[offset..]).to_string().parse::<u32>().unwrap();
-                (file, key, key_u32)
-            })
-            // decode key as u32 and filter out files that have already been uploaded
-            .filter(|(file, _, key_u32)| {
+            let mut to_upload = db_iter
+                .map(|item| {
+                    let (key, value) = item.expect("Failed to read database");
+                    let file: HerdFile =
+                        bincode::deserialize(&value).expect("Failed to deserialize");
+                    // decode the key as a string and strip the first two characters
+                    let key_u32 = String::from_utf8(key.to_vec()).expect("Failed to decode key");
+                    let key_u32 = key_u32[offset..].to_string().parse::<u32>().unwrap();
+                    (file, key, key_u32)
+                })
+                // decode key as u32 and filter out files that have already been uploaded
+                .filter(|(file, _, key_u32)| {
                     file.status == HerdStatus::Pending && 
                         key_u32 % node_count == idx &&
                         file.metadata
                             .get("Content-Type")
                             .map(|ct| ct != "application/octet-stream+xapian")
                             .unwrap_or(true)
-            });
+                });
 
-        // consume the iterator
+            // consume the iterator
             while let Some((file, key, _)) = to_upload.next().await {
-            // read the file from the local filesystem
+                // read the file from the local filesystem
                 // print file path being processed
                 let mut tokio_file = File::open(file.file_path.clone()).await.unwrap();
 
@@ -289,36 +298,36 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
 
                 lim.until_ready().await;
 
-            // upload the file to the swarm
-            let hash = bee_api::bytes_post(
-                client.clone(),
-                config.bee_api.clone(),
-                data,
-                &UploadConfig {
-                    stamp: config.stamp.clone(),
-                    pin: Some(true),
-                    tag: file.tag,
-                    deferred: Some(true),
-                },
-            )
-            .await;
+                // upload the file to the swarm
+                let hash = bee_api::bytes_post(
+                    client.clone(),
+                    config.bee_api.clone(),
+                    data,
+                    &UploadConfig {
+                        stamp: config.stamp.clone(),
+                        pin: Some(true),
+                        tag: file.tag,
+                        deferred: Some(true),
+                    },
+                )
+                .await;
 
-            // set the hash in herdfile and return it to the channel
-            // or return an error if the upload failed
-            match hash {
-                Ok(hash) => {
-                    let mut file = file;
-                    file.status = HerdStatus::Uploaded;
-                    file.reference = Some(hex::decode(hash.ref_).unwrap());
-                    tx.send(Ok((file, key)))
-                        .await
-                        .expect("Failed to send to channel");
-                }
-                Err(e) => {
-                    tx.send(Err(e)).await.unwrap();
+                // set the hash in herdfile and return it to the channel
+                // or return an error if the upload failed
+                match hash {
+                    Ok(hash) => {
+                        let mut file = file;
+                        file.status = HerdStatus::Uploaded;
+                        file.reference = Some(hex::decode(hash.ref_).unwrap());
+                        tx.send(Ok((file, key)))
+                            .await
+                            .expect("Failed to send to channel");
+                    }
+                    Err(e) => {
+                        tx.send(Err(e)).await.unwrap();
+                    }
                 }
             }
-        }
         }
     });
 
@@ -330,7 +339,11 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
 
 // generate a tags in batches.
 // just iterate over the files and generate a tag for each 100 files
-async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &Config) -> Result<(), Box<dyn std::error::Error + Send>> {
+async fn tag_index_generator(
+    db: &sled::Db,
+    client: &reqwest::Client,
+    config: &Config,
+) -> Result<(), Box<dyn std::error::Error + Send>> {
     // attempt to retrieve the hashmap from the db
     let index: Vec<u32> = match db.get("cluster_to_tag_index") {
         Ok(Some(index)) => {
@@ -342,7 +355,7 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
             pb.set_style(ProgressStyle::default_bar()
                 .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
                 .progress_chars("#>-"));
-            
+
             pb.set_message("Generating tags");
 
             // otherwise, create a new one
@@ -350,13 +363,16 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
 
             // using the bee api, create 100 tags
             for i in 0..100 {
-                let tag = bee_api::tag_post(client, config.bee_api.clone()).await.unwrap();
+                let tag = bee_api::tag_post(client, config.bee_api.clone())
+                    .await
+                    .unwrap();
                 index[i] = tag.uid;
                 pb.inc(1);
             }
 
             // write the index to the database
-            db.insert("cluster_to_tag_index", bincode::serialize(&index).unwrap()).unwrap();
+            db.insert("cluster_to_tag_index", bincode::serialize(&index).unwrap())
+                .unwrap();
 
             pb.finish_with_message("Tags generated");
             index
@@ -380,7 +396,7 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
-    
+
     pb.set_message("Tagging files");
 
     // files start with the f_ prefix in the database
@@ -388,7 +404,6 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
     let files = db
         .scan_prefix(FILE_PREFIX.as_bytes())
         .filter_map(|item| {
-
             let (key, value) = item.expect("Failed to read database");
             let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
             if file.status == HerdStatus::Pending && file.tag.is_none() {
@@ -412,7 +427,7 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
         batch.insert(key, bincode::serialize(&file).unwrap());
 
         if i % 1000 == 0 {
-    db.apply_batch(batch).expect("Failed to apply batch");
+            db.apply_batch(batch).expect("Failed to apply batch");
             batch = sled::Batch::default();
         }
 
@@ -422,7 +437,14 @@ async fn tag_index_generator(db: &sled::Db, client: &reqwest::Client, config: &C
     db.apply_batch(batch).expect("Failed to apply batch");
 
     // finish the progress bar with number of items processed and time elapsed
-    pb.finish_with_message(format!("Tagged {} files in {:?}", num_pending, start.elapsed()));
+    pb.finish_with_message(format!(
+        "Tagged {} files in {:?}",
+        num_pending,
+        start.elapsed()
+    ));
+    Ok(())
+}
+
     Ok(())
 }
 
