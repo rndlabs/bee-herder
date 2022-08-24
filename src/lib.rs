@@ -626,22 +626,10 @@ async fn manifest_gen(config: Config) -> Result<()> {
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
     // read current number of pending entries
-    let num_uploaded = match db
-        .get(bincode::serialize(&HerdStatus::Uploaded).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
+    let num_uploaded = get_num(&db, HerdStatus::Uploaded);
 
     // read current number of in syncing status
-    let num_syncing = match db
-        .get(bincode::serialize(&HerdStatus::Syncing).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
+    let num_syncing = get_num(&db, HerdStatus::Syncing);
 
     // create static variable to hold beeloadsaver
     // hold beeloadsaver using arc
