@@ -1,8 +1,14 @@
 use bee_api::UploadConfig;
 use governor::{Quota, RateLimiter};
 use indicatif::{ProgressBar, ProgressStyle};
+use mantaray::{
+    persist::BeeLoadSaver,
+    Entry, Manifest,
+};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, error::Error, fs, num::NonZeroU32};
+use std::{collections::HashMap, env, error::Error, num::NonZeroU32};
+
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -16,7 +22,9 @@ const FILE_PREFIX: &str = "f_";
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HerdStatus {
     Pending,
+    Tagged,
     Uploaded,
+    Syncing,
     Synced,
     Verified,
 }
@@ -445,6 +453,84 @@ async fn tag_index_generator(
     Ok(())
 }
 
+async fn manifest_gen(config: Config) -> Result<(), Box<dyn Error + Send>> {
+    // log the start time of the upload
+    let start = std::time::Instant::now();
+
+    let db = sled::open(&config.db).unwrap();
+    let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
+
+    // read current number of pending entries
+    let num_uploaded = match db
+        .get(bincode::serialize(&HerdStatus::Uploaded).unwrap())
+        .unwrap()
+    {
+        Some(b) => bincode::deserialize(&b).unwrap(),
+        None => 0,
+    };
+
+    // read current number of in syncing status
+    let num_syncing = match db
+        .get(bincode::serialize(&HerdStatus::Syncing).unwrap())
+        .unwrap()
+    {
+        Some(b) => bincode::deserialize(&b).unwrap(),
+        None => 0,
+    };
+
+    // create static variable to hold beeloadsaver
+    // hold beeloadsaver using arc
+    let beeloadsaver = Arc::new(BeeLoadSaver::new(
+        config.bee_api.clone(),
+        bee_api::BeeConfig {
+            upload: Some(UploadConfig {
+                stamp: config.stamp.clone(),
+                pin: Some(true),
+                tag: None, // TODO!enable tag generation for upload tracking
+                deferred: Some(true),
+            }),
+        },
+    ));
+
+    let mut manifest: Manifest = Manifest::new(Box::new(beeloadsaver), false);
+    manifest.trie.obfuscation_key = [0u8; 32].to_vec();
+
+    let indexer = tokio::spawn(async move {
+        tokio::pin!(db_iter);
+        let mut to_index = db_iter
+            .map(|item| {
+                let (key, value) = item.expect("Failed to read database");
+                let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
+                (file, key)
+            })
+            .filter(|(file, _)| file.status == HerdStatus::Uploaded);
+
+        // consume the iterator
+        while let Some((file, key)) = to_index.next().await {
+            // add to the manifest
+            manifest
+                .add(
+                    &file.prefix,
+                    Entry {
+                        reference: file.reference.unwrap(),
+                        metadata: file.metadata,
+                    },
+                )
+                .await.unwrap();
+        }
+        
+        // set metadata
+        let mut metadata = HashMap::new();
+        metadata.insert(String::from("website-index-document"), String::from("wiki/index"));
+
+        manifest.set_root(metadata).await.unwrap();
+
+        // save the manifest trie
+        manifest.save().await.unwrap();
+        println!("Manifest root: {:?}", hex::encode(manifest.trie.ref_));
+    });
+
+    indexer.await.unwrap();
     Ok(())
 }
 
@@ -452,7 +538,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn Error + Send>> {
     // if mode is files
     match config.mode {
         HerdMode::Files => files_upload(config).await?,
-        HerdMode::Manifest => todo!(),
+        HerdMode::Manifest => manifest_gen(config).await?,
         HerdMode::Refresh => todo!(),
     };
 
