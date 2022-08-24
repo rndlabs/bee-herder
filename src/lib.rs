@@ -1,5 +1,5 @@
 use bee_api::UploadConfig;
-use governor::{RateLimiter, Quota};
+use governor::{Quota, RateLimiter};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, env, error::Error, fs, num::NonZeroU32};
@@ -238,7 +238,9 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
         pb.finish_with_message(format!("{} files uploaded, {} failed in {} seconds", count, failed, start.elapsed().as_secs()));
     });
 
-    let lim = RateLimiter::direct(Quota::per_second(NonZeroU32::new(config.upload_rate).unwrap()));
+    let lim = RateLimiter::direct(Quota::per_second(
+        NonZeroU32::new(config.upload_rate).unwrap(),
+    ));
 
     let uploader = tokio::spawn(async move {
 
@@ -285,7 +287,7 @@ async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
 
                 drop(tokio_file);
 
-            lim.until_ready().await;
+                lim.until_ready().await;
 
             // upload the file to the swarm
             let hash = bee_api::bytes_post(
