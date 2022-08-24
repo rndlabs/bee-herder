@@ -575,6 +575,7 @@ async fn tagger(
             let mut file = file;
             let tag = index[i % NUM_UPLOAD_TAGS];
             file.tag = Some(tag);
+            file.status = HerdStatus::Tagged;
             (i, file, key)
         });
 
