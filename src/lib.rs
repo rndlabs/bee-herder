@@ -6,16 +6,29 @@ use mantaray::{
     Entry, Manifest,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, error::Error, num::NonZeroU32};
+use std::error;
+use std::{collections::HashMap, env, num::NonZeroU32};
 
 use std::sync::Arc;
+
+use thiserror::Error;
 
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt; // for read_to_end()
 
-// type Result<T> = std::result::Result<T, Box<dyn error::Error + Send>>;
+type Result<T> = std::result::Result<T, Box<dyn error::Error + Send>>;
+
+#[derive(Error, Debug)]
+pub enum BeeHerderError {
+    #[error("Environment variable {0} must be set")]
+    EnvVarNotSet(String),
+    #[error("Invalid mode")]
+    InvalidMode,
+    #[error("Environment variable {0} must be a number")]
+    EnvVarNotNumber(String),
+}
 
 const FILE_PREFIX: &str = "f_";
 
@@ -65,44 +78,44 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(matches: clap::ArgMatches) -> Result<Config, &'static str> {
+    pub fn new(matches: clap::ArgMatches) -> Result<Config> {
         let mode = match matches.value_of("mode").unwrap() {
             "files" => HerdMode::Files,
             "manifest" => HerdMode::Manifest,
             "refresh" => HerdMode::Refresh,
-            _ => return Err("Invalid mode"),
+            _ => return Err(Box::new(BeeHerderError::InvalidMode)),
         };
         let path = matches.value_of("path").unwrap().to_string();
 
         // return err if db is not set
         let db = match env::var("BEE_HERDER_DB") {
             Ok(val) => val,
-            Err(_) => return Err("Environment variable BEE_HERDER_DB must be set"),
+            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("BEE_HERDER_DB".to_string()))),
         };
 
         // return err if stamp is not set
         let stamp = match env::var("POSTAGE_BATCH") {
             Ok(val) => val,
-            Err(_) => return Err("Environment variable POSTAGE_BATCH must be set"),
+            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("POSTAGE_BATCH".to_string()))),
         };
 
         // return err if bee_api is not set
         let bee_api = match env::var("BEE_API_URL") {
             Ok(val) => val,
-            Err(_) => return Err("Environment variable BEE_API_URL must be set"),
+            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("BEE_API_URL".to_string()))),
         };
 
         // return err if bee_debug_api is not set
         let bee_debug_api = match env::var("BEE_DEBUG_API_URL") {
             Ok(val) => val,
-            Err(_) => return Err("Environment variable BEE_DEBUG_API_URL must be set"),
+            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("BEE_DEBUG_API_URL".to_string()))),
         };
 
         let upload_rate = match env::var("UPLOAD_RATE") {
             // parse as u32 or return err
             Ok(val) => match val.parse::<u32>() {
                 Ok(val) => val,
-                Err(_) => return Err("Environment variable UPLOAD_RATE must be a number"),
+                Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotNumber("UPLOAD_RATE".to_string()))),
             },
             Err(_) => 50,
         };
@@ -111,7 +124,7 @@ impl Config {
             // parse as u32 or return err
             Ok(val) => match val.parse::<u32>() {
                 Ok(val) => val,
-                Err(_) => return Err("Environment variable NODE_ID must be a number"),
+                Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotNumber("NODE_ID".to_string()))),
             },
             Err(_) => 0,
         };
@@ -120,7 +133,7 @@ impl Config {
             // parse as u32 or return err
             Ok(val) => match val.parse::<u32>() {
                 Ok(val) => val,
-                Err(_) => return Err("Environment variable NODE_COUNT must be a number"),
+                Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotNumber("NODE_COUNT".to_string()))),
             },
             Err(_) => 1,
         };
@@ -139,7 +152,7 @@ impl Config {
     }
 }
 
-async fn files_upload(config: Config) -> Result<(), Box<dyn Error + Send>> {
+async fn files_upload(config: Config) -> Result<()> {
     let client = reqwest::Client::new();
 
     // log the start time of the upload
@@ -351,7 +364,7 @@ async fn tag_index_generator(
     db: &sled::Db,
     client: &reqwest::Client,
     config: &Config,
-) -> Result<(), Box<dyn std::error::Error + Send>> {
+) -> Result<()> {
     // attempt to retrieve the hashmap from the db
     let index: Vec<u32> = match db.get("cluster_to_tag_index") {
         Ok(Some(index)) => {
@@ -453,7 +466,7 @@ async fn tag_index_generator(
     Ok(())
 }
 
-async fn manifest_gen(config: Config) -> Result<(), Box<dyn Error + Send>> {
+async fn manifest_gen(config: Config) -> Result<()> {
     // log the start time of the upload
     let start = std::time::Instant::now();
 
@@ -534,7 +547,7 @@ async fn manifest_gen(config: Config) -> Result<(), Box<dyn Error + Send>> {
     Ok(())
 }
 
-pub async fn run(config: Config) -> Result<(), Box<dyn Error + Send>> {
+pub async fn run(config: Config) -> Result<()> {
     // if mode is files
     match config.mode {
         HerdMode::Files => files_upload(config).await?,

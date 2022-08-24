@@ -18,3 +18,4 @@ tokio-stream = "0.1.9"
 bee_api = { path = "../bee_api" }
 mantaray = { path = "../mantaray" }
 governor = "0.4.2"
+thiserror = "1.0.32"
