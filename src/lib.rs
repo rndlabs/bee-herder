@@ -28,6 +28,7 @@ pub enum BeeHerderError {
 }
 
 const FILE_PREFIX: &str = "f_";
+const NUM_UPLOAD_TAGS: usize = 100;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HerdStatus {
@@ -210,7 +211,9 @@ async fn files_upload(config: Config) -> Result<()> {
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
 
-    // create a sync channel for processing completed items
+    pb.set_message("Uploading");
+
+    // create a sync channel for processing *completed* items
     let sync_thread_db = db.clone();
     let director = tokio::spawn(async move {
         // convert rx to a ReceiverStream
@@ -293,11 +296,13 @@ async fn files_upload(config: Config) -> Result<()> {
         let node_id = config.node_id;
         let node_count = config.node_count;
 
-        let offset = 2 + config.path.len() + 1;
+        let offset = 2 + config.path.len() + 1; // TODO: Can replace this index with a shorter index in future
 
         for i in 0..node_count {
             let idx = (node_id + i) % node_count;
-            println!("Node {} uploading", idx);
+            if node_count > 1 {
+                println!("Node id {} uploading {}/{}", idx, idx+1, node_count);
+            }
 
             let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
             tokio::pin!(db_iter);
@@ -319,7 +324,7 @@ async fn files_upload(config: Config) -> Result<()> {
                         && file
                             .metadata
                             .get("Content-Type")
-                            .map(|ct| ct != "application/octet-stream+xapian")
+                            .map(|ct| ct != "application/octet-stream+xapian") // TODO: Filter at wiki_extractor level
                             .unwrap_or(true)
                 });
 
@@ -332,8 +337,10 @@ async fn files_upload(config: Config) -> Result<()> {
                 let mut data = vec![];
                 tokio_file.read_to_end(&mut data).await.unwrap();
 
+                // ensure we drop the file handle
                 drop(tokio_file);
 
+                // throttle the upload rate
                 lim.until_ready().await;
 
                 // upload the file to the swarm
@@ -389,7 +396,8 @@ async fn tagger(
             bincode::deserialize(&index).unwrap()
         }
         _ => {
-            let pb = ProgressBar::new(100);
+            // otherwise, create a new one
+            let pb = ProgressBar::new(NUM_UPLOAD_TAGS.try_into().unwrap());
             pb.set_style(ProgressStyle::default_bar()
                 .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
                 .progress_chars("#>-"));
@@ -397,10 +405,10 @@ async fn tagger(
             pb.set_message("Generating tags");
 
             // otherwise, create a new one
-            let mut index = vec![0; 100];
+            let mut index = vec![0; NUM_UPLOAD_TAGS];
 
-            // using the bee api, create 100 tags
-            for i in 0..100 {
+            // using the bee api, create NUM_UPLOAD_TAGS tags
+            for i in 0..NUM_UPLOAD_TAGS {
                 let tag = bee_api::tag_post(client, config.bee_api.clone())
                     .await
                     .unwrap();
