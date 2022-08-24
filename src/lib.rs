@@ -28,6 +28,7 @@ pub enum BeeHerderError {
 }
 
 const FILE_PREFIX: &str = "f_";
+const NUM_UPLOAD_TAGS: usize = 100;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HerdStatus {
@@ -57,7 +58,8 @@ pub struct HerdIndexItem {
 }
 
 pub enum HerdMode {
-    Files,
+    Import,
+    Upload,
     Manifest,
     Refresh,
 }
@@ -77,7 +79,8 @@ pub struct Config {
 impl Config {
     pub fn new(matches: clap::ArgMatches) -> Result<Config> {
         let mode = match matches.value_of("mode").unwrap() {
-            "files" => HerdMode::Files,
+            "import" => HerdMode::Import,
+            "upload" => HerdMode::Upload,
             "manifest" => HerdMode::Manifest,
             "refresh" => HerdMode::Refresh,
             _ => return Err(Box::new(BeeHerderError::InvalidMode)),
@@ -177,6 +180,118 @@ impl Config {
     }
 }
 
+async fn import_dir(config: Config) -> Result<()> {
+    let db = sled::open(config.db).expect("Unable to open database");
+    // get the number of pending files
+    let num_pending = get_num(&db, HerdStatus::Pending);
+    println!("{} pending files before import", num_pending);
+
+    // from a directory, recursively import all files into the db
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    let mut dir = tokio::fs::read_dir(&config.path).await.unwrap();
+    while let Some(entry) = dir.next_entry().await.unwrap() {
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        } else {
+            files.push(path);
+        }
+    }
+
+    // use loop to avoid recursion
+    while !dirs.is_empty() {
+        let mut new_dirs = Vec::new();
+        for dir in dirs {
+            let mut dir = tokio::fs::read_dir(&dir).await.unwrap();
+            while let Some(entry) = dir.next_entry().await.unwrap() {
+                let path = entry.path();
+                if path.is_dir() {
+                    new_dirs.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        dirs = new_dirs;
+    }
+
+    let mut batch = sled::Batch::default();
+
+    // count files
+    let mut count = 0;
+    for file in files {
+        let file_path = file.to_str().unwrap().to_string();
+        // set prefix to the file path relative to the root path excluding the leading slash
+        let prefix = file_path
+            .strip_prefix(&config.path)
+            .unwrap()
+            .strip_prefix("/")
+            .unwrap()
+            .to_string();
+
+        // print the file path
+        println!("Importing {} as {}", file_path, prefix);
+
+        let mut metadata = HashMap::new();
+        let content_type = match file_path.split(".").last() {
+            Some("png") => "image/png",
+            Some("jpg") => "image/jpeg",
+            Some("jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("svg") => "image/svg+xml",
+            Some("mp4") => "video/mp4",
+            Some("webm") => "video/webm",
+            Some("mp3") => "audio/mpeg",
+            Some("wav") => "audio/wav",
+            Some("ogg") => "audio/ogg",
+            Some("pdf") => "application/pdf",
+            Some("txt") => "text/plain",
+            Some("html") => "text/html",
+            Some("css") => "text/css",
+            Some("json") => "application/json",
+            Some("xml") => "application/xml",
+            Some("zip") => "application/zip",
+            Some("tar") => "application/x-tar",
+            Some("gz") => "application/gzip",
+            Some("rar") => "application/x-rar-compressed",
+            Some("7z") => "application/x-7z-compressed",
+            Some("js") => "text/javascript",
+            Some(_) => "application/octet-stream",
+            None => "application/octet-stream",
+        };
+        metadata.insert("Content-Type".to_string(), content_type.to_string());
+
+        let herd_file = HerdFile {
+            file_path, // absolute file path
+            prefix, // should be relative to the path specified in the config
+            status: HerdStatus::Pending,
+            tag: None,
+            reference: None,
+            mantaray_reference: None,
+            metadata,
+        };
+        let mut key = "f_".as_bytes().to_vec();
+        key.extend_from_slice(herd_file.file_path.as_bytes());
+        batch.insert(key, bincode::serialize(&herd_file).unwrap());
+
+        count += 1;
+    }
+
+    batch.insert(
+        bincode::serialize(&HerdStatus::Pending).unwrap(),
+        bincode::serialize(&(num_pending + count)).unwrap(),
+    );
+    db.apply_batch(batch).expect("Failed to apply batch");
+
+    let num_pending = get_num(&db, HerdStatus::Pending);
+    println!("{} pending files after import", num_pending);
+
+    println!("Imported {} files", count);
+
+    Ok(())
+}
+
 async fn files_upload(config: Config) -> Result<()> {
     let client = reqwest::Client::new();
 
@@ -185,41 +300,32 @@ async fn files_upload(config: Config) -> Result<()> {
 
     let db = sled::open(&config.db).unwrap();
 
-    // first generate the tag index
-    tag_index_generator(&db, &client, &config).await?;
+    // if there are pending files, make sure they are tagged
+    if get_num(&db, HerdStatus::Pending) > 0 {
+        tagger(&db, &client, &config).await?;
+    }
 
     // read current number of pending entries
-    let num_pending = match db
-        .get(bincode::serialize(&HerdStatus::Pending).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
+    let num_pending = get_num(&db, HerdStatus::Pending);
+    let num_tagged = get_num(&db, HerdStatus::Tagged);
+    let num_uploaded = get_num(&db, HerdStatus::Uploaded);
 
-    // read current number of pending entries
-    let num_uploaded = match db
-        .get(bincode::serialize(&HerdStatus::Uploaded).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
-
-    // if number of pending entries is 0, then we are done
-    if num_pending == 0 {
-        println!("No pending entries to upload");
+    // if number of tagged entries is 0, then we are done
+    if num_tagged == 0 {
+        println!("No tagged entries to upload");
         return Ok(());
     }
 
     let (tx, rx) = mpsc::channel(100);
 
-    let pb = ProgressBar::new(num_pending);
+    let pb = ProgressBar::new(num_tagged);
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
 
-    // create a sync channel for processing completed items
+    pb.set_message("Uploading");
+
+    // create a sync channel for processing *completed* items
     let sync_thread_db = db.clone();
     let director = tokio::spawn(async move {
         // convert rx to a ReceiverStream
@@ -245,8 +351,8 @@ async fn files_upload(config: Config) -> Result<()> {
             count += 1;
             if count % 500 == 0 {
                 batch.insert(
-                    bincode::serialize(&HerdStatus::Pending).unwrap(),
-                    bincode::serialize(&(num_pending - count)).unwrap(),
+                    bincode::serialize(&HerdStatus::Tagged).unwrap(),
+                    bincode::serialize(&(num_tagged - count)).unwrap(),
                 );
                 batch.insert(
                     bincode::serialize(&HerdStatus::Uploaded).unwrap(),
@@ -264,11 +370,11 @@ async fn files_upload(config: Config) -> Result<()> {
         // write the final batch
         if num_pending - count > 0 {
             batch.insert(
-                bincode::serialize(&HerdStatus::Pending).unwrap(),
-                bincode::serialize(&(num_pending - count)).unwrap(),
+                bincode::serialize(&HerdStatus::Tagged).unwrap(),
+                bincode::serialize(&(num_tagged - count)).unwrap(),
             );
         } else {
-            batch.remove(bincode::serialize(&HerdStatus::Pending).unwrap());
+            batch.remove(bincode::serialize(&HerdStatus::Tagged).unwrap());
         }
 
         if num_uploaded + count > 0 {
@@ -302,11 +408,13 @@ async fn files_upload(config: Config) -> Result<()> {
         let node_id = config.node_id;
         let node_count = config.node_count;
 
-        let offset = 2 + config.path.len() + 1;
+        let offset = 2 + config.path.len() + 1; // TODO: Can replace this index with a shorter index in future
 
         for i in 0..node_count {
             let idx = (node_id + i) % node_count;
-            println!("Node {} uploading", idx);
+            if node_count > 1 {
+                println!("Node id {} uploading {}/{}", idx, idx+1, node_count);
+            }
 
             let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
             tokio::pin!(db_iter);
@@ -317,23 +425,23 @@ async fn files_upload(config: Config) -> Result<()> {
                     let file: HerdFile =
                         bincode::deserialize(&value).expect("Failed to deserialize");
                     // decode the key as a string and strip the first two characters
-                    let key_u32 = String::from_utf8(key.to_vec()).expect("Failed to decode key");
-                    let key_u32 = key_u32[offset..].to_string().parse::<u32>().unwrap();
-                    (file, key, key_u32)
+                    // let key_u32 = String::from_utf8(key.to_vec()).expect("Failed to decode key");
+                    // let key_u32 = key_u32[offset..].to_string().parse::<u32>().unwrap();
+                    (file, key)
                 })
                 // decode key as u32 and filter out files that have already been uploaded
-                .filter(|(file, _, key_u32)| {
-                    file.status == HerdStatus::Pending
-                        && key_u32 % node_count == idx
+                .filter(|(file, _)| {
+                    file.status == HerdStatus::Tagged
+                        // && key_u32 % node_count == idx
                         && file
                             .metadata
                             .get("Content-Type")
-                            .map(|ct| ct != "application/octet-stream+xapian")
+                            .map(|ct| ct != "application/octet-stream+xapian") // TODO: Filter at wiki_extractor level
                             .unwrap_or(true)
                 });
 
             // consume the iterator
-            while let Some((file, key, _)) = to_upload.next().await {
+            while let Some((file, key)) = to_upload.next().await {
                 // read the file from the local filesystem
                 // print file path being processed
                 let mut tokio_file = File::open(file.file_path.clone()).await.unwrap();
@@ -341,8 +449,10 @@ async fn files_upload(config: Config) -> Result<()> {
                 let mut data = vec![];
                 tokio_file.read_to_end(&mut data).await.unwrap();
 
+                // ensure we drop the file handle
                 drop(tokio_file);
 
+                // throttle the upload rate
                 lim.until_ready().await;
 
                 // upload the file to the swarm
@@ -384,9 +494,9 @@ async fn files_upload(config: Config) -> Result<()> {
     Ok(())
 }
 
-// generate a tags in batches.
+// generate tags in batches.
 // just iterate over the files and generate a tag for each 100 files
-async fn tag_index_generator(
+async fn tagger(
     db: &sled::Db,
     client: &reqwest::Client,
     config: &Config,
@@ -398,7 +508,8 @@ async fn tag_index_generator(
             bincode::deserialize(&index).unwrap()
         }
         _ => {
-            let pb = ProgressBar::new(100);
+            // otherwise, create a new one
+            let pb = ProgressBar::new(NUM_UPLOAD_TAGS.try_into().unwrap());
             pb.set_style(ProgressStyle::default_bar()
                 .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
                 .progress_chars("#>-"));
@@ -406,10 +517,10 @@ async fn tag_index_generator(
             pb.set_message("Generating tags");
 
             // otherwise, create a new one
-            let mut index = vec![0; 100];
+            let mut index = vec![0; NUM_UPLOAD_TAGS];
 
-            // using the bee api, create 100 tags
-            for i in 0..100 {
+            // using the bee api, create NUM_UPLOAD_TAGS tags
+            for i in 0..NUM_UPLOAD_TAGS {
                 let tag = bee_api::tag_post(client, config.bee_api.clone())
                     .await
                     .unwrap();
@@ -426,17 +537,15 @@ async fn tag_index_generator(
         }
     };
 
-    // create a batch to write the index to the database
+    // create a batch in which to append tagged files to the database
     let mut batch = sled::Batch::default();
 
     // get starting time
     let start = std::time::Instant::now();
 
     // get number of pending files
-    let num_pending = match db.get(bincode::serialize(&HerdStatus::Pending).unwrap()) {
-        Ok(Some(num)) => bincode::deserialize(&num).unwrap(),
-        _ => 0,
-    };
+    let num_pending = get_num(&db, HerdStatus::Pending);
+    let num_tagged = get_num(&db, HerdStatus::Tagged);
 
     let pb = ProgressBar::new(num_pending);
 
@@ -464,23 +573,40 @@ async fn tag_index_generator(
         // map the files to a new tag based on the index
         .map(|(i, (file, key))| {
             let mut file = file;
-            let tag = index[i % 100];
+            let tag = index[i % NUM_UPLOAD_TAGS];
             file.tag = Some(tag);
+            file.status = HerdStatus::Tagged;
             (i, file, key)
         });
+
+    // count the number of tagged files
+    let mut count = 0;
 
     // write the tagged files to the database
     for (i, file, key) in files {
         batch.insert(key, bincode::serialize(&file).unwrap());
 
         if i % 1000 == 0 {
+            batch.insert(bincode::serialize(&HerdStatus::Tagged).unwrap(), bincode::serialize(&(num_tagged + count)).unwrap());
+            // todo: should guard against the case where the total size is 1000 and num_pending becomes 0
+            batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&(num_pending - count)).unwrap());
             db.apply_batch(batch).expect("Failed to apply batch");
             batch = sled::Batch::default();
         }
 
         pb.inc(1);
+        count += 1;
     }
 
+    // set the number of tagged files in the database
+    batch.insert(bincode::serialize(&HerdStatus::Tagged).unwrap(), bincode::serialize(&(num_tagged + count)).unwrap());
+    if num_pending - count > 0 {
+        batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&(num_pending - count)).unwrap());
+    } else {
+        batch.remove(bincode::serialize(&HerdStatus::Pending).unwrap());
+    }
+
+    // write the remaining files to the database
     db.apply_batch(batch).expect("Failed to apply batch");
 
     // finish the progress bar with number of items processed and time elapsed
@@ -580,10 +706,19 @@ async fn manifest_gen(config: Config) -> Result<()> {
 pub async fn run(config: Config) -> Result<()> {
     // if mode is files
     match config.mode {
-        HerdMode::Files => files_upload(config).await?,
+        HerdMode::Import => import_dir(config).await?,
+        HerdMode::Upload => files_upload(config).await?,
         HerdMode::Manifest => manifest_gen(config).await?,
         HerdMode::Refresh => todo!(),
     };
 
     Ok(())
+}
+
+// a function that takes a database and returns a specific key as a number or 0 if it does not exist
+fn get_num(db: &sled::Db, key: HerdStatus) -> u64 {
+    match db.get(bincode::serialize(&key).unwrap()) {
+        Ok(Some(num)) => bincode::deserialize(&num).unwrap(),
+        _ => 0,
+    }
 }
