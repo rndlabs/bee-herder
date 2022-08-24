@@ -187,36 +187,25 @@ async fn files_upload(config: Config) -> Result<()> {
 
     let db = sled::open(&config.db).unwrap();
 
-    // first generate the tag index
-    tag_index_generator(&db, &client, &config).await?;
+    // if there are pending files, make sure they are tagged
+    if get_num(&db, HerdStatus::Pending) > 0 {
+        tagger(&db, &client, &config).await?;
+    }
 
     // read current number of pending entries
-    let num_pending = match db
-        .get(bincode::serialize(&HerdStatus::Pending).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
+    let num_pending = get_num(&db, HerdStatus::Pending);
+    let num_tagged = get_num(&db, HerdStatus::Tagged);
+    let num_uploaded = get_num(&db, HerdStatus::Uploaded);
 
-    // read current number of pending entries
-    let num_uploaded = match db
-        .get(bincode::serialize(&HerdStatus::Uploaded).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
-
-    // if number of pending entries is 0, then we are done
-    if num_pending == 0 {
-        println!("No pending entries to upload");
+    // if number of tagged entries is 0, then we are done
+    if num_tagged == 0 {
+        println!("No tagged entries to upload");
         return Ok(());
     }
 
     let (tx, rx) = mpsc::channel(100);
 
-    let pb = ProgressBar::new(num_pending);
+    let pb = ProgressBar::new(num_tagged);
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
@@ -247,8 +236,8 @@ async fn files_upload(config: Config) -> Result<()> {
             count += 1;
             if count % 500 == 0 {
                 batch.insert(
-                    bincode::serialize(&HerdStatus::Pending).unwrap(),
-                    bincode::serialize(&(num_pending - count)).unwrap(),
+                    bincode::serialize(&HerdStatus::Tagged).unwrap(),
+                    bincode::serialize(&(num_tagged - count)).unwrap(),
                 );
                 batch.insert(
                     bincode::serialize(&HerdStatus::Uploaded).unwrap(),
@@ -266,11 +255,11 @@ async fn files_upload(config: Config) -> Result<()> {
         // write the final batch
         if num_pending - count > 0 {
             batch.insert(
-                bincode::serialize(&HerdStatus::Pending).unwrap(),
-                bincode::serialize(&(num_pending - count)).unwrap(),
+                bincode::serialize(&HerdStatus::Tagged).unwrap(),
+                bincode::serialize(&(num_tagged - count)).unwrap(),
             );
         } else {
-            batch.remove(bincode::serialize(&HerdStatus::Pending).unwrap());
+            batch.remove(bincode::serialize(&HerdStatus::Tagged).unwrap());
         }
 
         if num_uploaded + count > 0 {
@@ -386,9 +375,9 @@ async fn files_upload(config: Config) -> Result<()> {
     Ok(())
 }
 
-// generate a tags in batches.
+// generate tags in batches.
 // just iterate over the files and generate a tag for each 100 files
-async fn tag_index_generator(
+async fn tagger(
     db: &sled::Db,
     client: &reqwest::Client,
     config: &Config,
@@ -428,17 +417,15 @@ async fn tag_index_generator(
         }
     };
 
-    // create a batch to write the index to the database
+    // create a batch in which to append tagged files to the database
     let mut batch = sled::Batch::default();
 
     // get starting time
     let start = std::time::Instant::now();
 
     // get number of pending files
-    let num_pending = match db.get(bincode::serialize(&HerdStatus::Pending).unwrap()) {
-        Ok(Some(num)) => bincode::deserialize(&num).unwrap(),
-        _ => 0,
-    };
+    let num_pending = get_num(&db, HerdStatus::Pending);
+    let num_tagged = get_num(&db, HerdStatus::Tagged);
 
     let pb = ProgressBar::new(num_pending);
 
@@ -466,23 +453,39 @@ async fn tag_index_generator(
         // map the files to a new tag based on the index
         .map(|(i, (file, key))| {
             let mut file = file;
-            let tag = index[i % 100];
+            let tag = index[i % NUM_UPLOAD_TAGS];
             file.tag = Some(tag);
             (i, file, key)
         });
+
+    // count the number of tagged files
+    let mut count = 0;
 
     // write the tagged files to the database
     for (i, file, key) in files {
         batch.insert(key, bincode::serialize(&file).unwrap());
 
         if i % 1000 == 0 {
+            batch.insert(bincode::serialize(&HerdStatus::Tagged).unwrap(), bincode::serialize(&(num_tagged + count)).unwrap());
+            // todo: should guard against the case where the total size is 1000 and num_pending becomes 0
+            batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&(num_pending - count)).unwrap());
             db.apply_batch(batch).expect("Failed to apply batch");
             batch = sled::Batch::default();
         }
 
         pb.inc(1);
+        count += 1;
     }
 
+    // set the number of tagged files in the database
+    batch.insert(bincode::serialize(&HerdStatus::Tagged).unwrap(), bincode::serialize(&(num_tagged + count)).unwrap());
+    if num_pending - count > 0 {
+        batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&(num_pending - count)).unwrap());
+    } else {
+        batch.remove(bincode::serialize(&HerdStatus::Pending).unwrap());
+    }
+
+    // write the remaining files to the database
     db.apply_batch(batch).expect("Failed to apply batch");
 
     // finish the progress bar with number of items processed and time elapsed
@@ -589,4 +592,12 @@ pub async fn run(config: Config) -> Result<()> {
     };
 
     Ok(())
+}
+
+// a function that takes a database and returns a specific key as a number or 0 if it does not exist
+fn get_num(db: &sled::Db, key: HerdStatus) -> u64 {
+    match db.get(bincode::serialize(&key).unwrap()) {
+        Ok(Some(num)) => bincode::deserialize(&num).unwrap(),
+        _ => 0,
+    }
 }
