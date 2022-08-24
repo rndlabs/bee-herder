@@ -57,7 +57,8 @@ pub struct HerdIndexItem {
 }
 
 pub enum HerdMode {
-    Files,
+    Import,
+    Upload,
     Manifest,
     Refresh,
 }
@@ -77,7 +78,8 @@ pub struct Config {
 impl Config {
     pub fn new(matches: clap::ArgMatches) -> Result<Config> {
         let mode = match matches.value_of("mode").unwrap() {
-            "files" => HerdMode::Files,
+            "import" => HerdMode::Import,
+            "upload" => HerdMode::Upload,
             "manifest" => HerdMode::Manifest,
             "refresh" => HerdMode::Refresh,
             _ => return Err(Box::new(BeeHerderError::InvalidMode)),
@@ -580,7 +582,8 @@ async fn manifest_gen(config: Config) -> Result<()> {
 pub async fn run(config: Config) -> Result<()> {
     // if mode is files
     match config.mode {
-        HerdMode::Files => files_upload(config).await?,
+        HerdMode::Import => todo!(),
+        HerdMode::Upload => files_upload(config).await?,
         HerdMode::Manifest => manifest_gen(config).await?,
         HerdMode::Refresh => todo!(),
     };
