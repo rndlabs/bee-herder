@@ -1,10 +1,7 @@
 use bee_api::UploadConfig;
 use governor::{Quota, RateLimiter};
 use indicatif::{ProgressBar, ProgressStyle};
-use mantaray::{
-    persist::BeeLoadSaver,
-    Entry, Manifest,
-};
+use mantaray::{persist::BeeLoadSaver, Entry, Manifest};
 use serde::{Deserialize, Serialize};
 use std::error;
 use std::{collections::HashMap, env, num::NonZeroU32};
@@ -13,10 +10,10 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt; // for read_to_end()
+use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt; // for read_to_end()
 
 type Result<T> = std::result::Result<T, Box<dyn error::Error + Send>>;
 
@@ -90,32 +87,52 @@ impl Config {
         // return err if db is not set
         let db = match env::var("BEE_HERDER_DB") {
             Ok(val) => val,
-            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("BEE_HERDER_DB".to_string()))),
+            Err(_) => {
+                return Err(Box::new(BeeHerderError::EnvVarNotSet(
+                    "BEE_HERDER_DB".to_string(),
+                )))
+            }
         };
 
         // return err if stamp is not set
         let stamp = match env::var("POSTAGE_BATCH") {
             Ok(val) => val,
-            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("POSTAGE_BATCH".to_string()))),
+            Err(_) => {
+                return Err(Box::new(BeeHerderError::EnvVarNotSet(
+                    "POSTAGE_BATCH".to_string(),
+                )))
+            }
         };
 
         // return err if bee_api is not set
         let bee_api = match env::var("BEE_API_URL") {
             Ok(val) => val,
-            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("BEE_API_URL".to_string()))),
+            Err(_) => {
+                return Err(Box::new(BeeHerderError::EnvVarNotSet(
+                    "BEE_API_URL".to_string(),
+                )))
+            }
         };
 
         // return err if bee_debug_api is not set
         let bee_debug_api = match env::var("BEE_DEBUG_API_URL") {
             Ok(val) => val,
-            Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotSet("BEE_DEBUG_API_URL".to_string()))),
+            Err(_) => {
+                return Err(Box::new(BeeHerderError::EnvVarNotSet(
+                    "BEE_DEBUG_API_URL".to_string(),
+                )))
+            }
         };
 
         let upload_rate = match env::var("UPLOAD_RATE") {
             // parse as u32 or return err
             Ok(val) => match val.parse::<u32>() {
                 Ok(val) => val,
-                Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotNumber("UPLOAD_RATE".to_string()))),
+                Err(_) => {
+                    return Err(Box::new(BeeHerderError::EnvVarNotNumber(
+                        "UPLOAD_RATE".to_string(),
+                    )))
+                }
             },
             Err(_) => 50,
         };
@@ -124,7 +141,11 @@ impl Config {
             // parse as u32 or return err
             Ok(val) => match val.parse::<u32>() {
                 Ok(val) => val,
-                Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotNumber("NODE_ID".to_string()))),
+                Err(_) => {
+                    return Err(Box::new(BeeHerderError::EnvVarNotNumber(
+                        "NODE_ID".to_string(),
+                    )))
+                }
             },
             Err(_) => 0,
         };
@@ -133,7 +154,11 @@ impl Config {
             // parse as u32 or return err
             Ok(val) => match val.parse::<u32>() {
                 Ok(val) => val,
-                Err(_) => return Err(Box::new(BeeHerderError::EnvVarNotNumber("NODE_COUNT".to_string()))),
+                Err(_) => {
+                    return Err(Box::new(BeeHerderError::EnvVarNotNumber(
+                        "NODE_COUNT".to_string(),
+                    )))
+                }
             },
             Err(_) => 1,
         };
@@ -298,9 +323,10 @@ async fn files_upload(config: Config) -> Result<()> {
                 })
                 // decode key as u32 and filter out files that have already been uploaded
                 .filter(|(file, _, key_u32)| {
-                    file.status == HerdStatus::Pending && 
-                        key_u32 % node_count == idx &&
-                        file.metadata
+                    file.status == HerdStatus::Pending
+                        && key_u32 % node_count == idx
+                        && file
+                            .metadata
                             .get("Content-Type")
                             .map(|ct| ct != "application/octet-stream+xapian")
                             .unwrap_or(true)
@@ -529,12 +555,16 @@ async fn manifest_gen(config: Config) -> Result<()> {
                         metadata: file.metadata,
                     },
                 )
-                .await.unwrap();
+                .await
+                .unwrap();
         }
-        
+
         // set metadata
         let mut metadata = HashMap::new();
-        metadata.insert(String::from("website-index-document"), String::from("wiki/index"));
+        metadata.insert(
+            String::from("website-index-document"),
+            String::from("wiki/index"),
+        );
 
         manifest.set_root(metadata).await.unwrap();
 
