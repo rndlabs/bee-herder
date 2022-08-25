@@ -1,5 +1,5 @@
 use bee_api::UploadConfig;
-use governor::{Quota, RateLimiter};
+use governor::{Quota, RateLimiter, Jitter};
 use indicatif::{ProgressBar, ProgressStyle};
 use mantaray::{persist::BeeLoadSaver, Entry, Manifest};
 use serde::{Deserialize, Serialize};
@@ -399,7 +399,7 @@ async fn files_upload(config: Config) -> Result<()> {
             failed,
             start.elapsed().as_secs()
         ));
-    });
+    }));
 
     let uploader_db = db.clone();
     handles.push(tokio::spawn(async move {
@@ -493,7 +493,19 @@ async fn files_upload(config: Config) -> Result<()> {
 
     futures::future::join_all(handles).await;
 
-    });
+    // At this point all files have been uploaded, so let's check if there are any files that need to be uploaded
+    // again
+    db.scan_prefix(FILE_PREFIX.as_bytes())
+        .map(|item| {
+            let (key, value) = item.expect("Failed to read database");
+            let file: HerdFile =
+                bincode::deserialize(&value).expect("Failed to deserialize");
+            (file, key)
+        })
+        .filter(|(file, _)| file.status == HerdStatus::Tagged)
+        .for_each(|(file, key)| {
+            println!("Failed to upload {:?}", file);
+        });
 
     Ok(())
 }
