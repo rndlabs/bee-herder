@@ -639,6 +639,8 @@ async fn manifest_gen(config: Config) -> Result<()> {
     let start = std::time::Instant::now();
 
     let db = sled::open(&config.db).unwrap();
+    let mut handles = Vec::new();
+
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
     // read current number of pending entries
@@ -661,10 +663,36 @@ async fn manifest_gen(config: Config) -> Result<()> {
         },
     ));
 
-    let mut manifest: Manifest = Manifest::new(Box::new(beeloadsaver), false);
-    manifest.trie.obfuscation_key = [0u8; 32].to_vec();
+    // a thread to monitor the progress of the indexer
+    let (tx, rx) = mpsc::channel::<Result<(HerdFile, IVec)>>(100);
 
-    let indexer = tokio::spawn(async move {
+    let pb = ProgressBar::new(num_uploaded);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
+        .progress_chars("#>-"));
+
+    pb.set_message("Building manifest");
+
+    // create a sync channel for processing *completed* items
+    handles.push(tokio::spawn(async move {
+        // convert rx to a ReceiverStream
+        let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
+        // consume the channel
+        let mut count = 0;
+        let mut failed = 0;
+        while let Some(result) = rx.next().await {
+            if result.is_err() {
+                failed += 1;
+            }
+
+            count += 1;
+            pb.inc(1);
+        }
+
+    }));
+
+    // indexer thread for generating the manifest
+    handles.push(tokio::spawn(async move {
         tokio::pin!(db_iter);
         let mut to_index = db_iter
             .map(|item| {
@@ -674,6 +702,9 @@ async fn manifest_gen(config: Config) -> Result<()> {
             })
             .filter(|(file, _)| file.status == HerdStatus::Uploaded);
 
+        let mut count = 0;
+        let mut manifest: Manifest = Manifest::new(Box::new(beeloadsaver.clone()), false);
+
         // consume the iterator
         while let Some((file, key)) = to_index.next().await {
             // add to the manifest
@@ -681,12 +712,25 @@ async fn manifest_gen(config: Config) -> Result<()> {
                 .add(
                     &file.prefix,
                     Entry {
-                        reference: file.reference.unwrap(),
-                        metadata: file.metadata,
+                        reference: file.reference.as_ref().unwrap().clone(),
+                        metadata: file.metadata.clone(),
                     },
                 )
                 .await
                 .unwrap();
+            tx.send(Ok((file, key))).await.unwrap();
+
+            count += 1;
+
+            // for every 1000 items, save the manifest to dump out the forks
+            if count % 1000 == 0 {
+                println!("Saving manifest at {}", count);
+                manifest.store().await.unwrap();
+                let ref_ = manifest.trie.ref_;
+
+                // reset the manifest
+                manifest = Manifest::new_manifest_reference(ref_, Box::new(beeloadsaver.clone())).unwrap();
+            }
         }
 
         // set metadata
@@ -699,11 +743,13 @@ async fn manifest_gen(config: Config) -> Result<()> {
         manifest.set_root(metadata).await.unwrap();
 
         // save the manifest trie
-        manifest.save().await.unwrap();
+        manifest.store().await.unwrap();
         println!("Manifest root: {:?}", hex::encode(manifest.trie.ref_));
-    });
+        println!("Processed {} files", count);
+    }));
 
-    indexer.await.unwrap();
+    futures::future::join_all(handles).await;
+
     Ok(())
 }
 
