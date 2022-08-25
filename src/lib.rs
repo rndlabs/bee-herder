@@ -4,6 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use mantaray::{persist::BeeLoadSaver, Entry, Manifest};
 use serde::{Deserialize, Serialize};
 use std::error;
+use std::time::Duration;
 use std::{collections::HashMap, env, num::NonZeroU32};
 
 use std::sync::Arc;
@@ -299,6 +300,7 @@ async fn files_upload(config: Config) -> Result<()> {
     let start = std::time::Instant::now();
 
     let db = sled::open(&config.db).unwrap();
+    let mut handles = Vec::new();
 
     // if there are pending files, make sure they are tagged
     if get_num(&db, HerdStatus::Pending) > 0 {
@@ -327,7 +329,7 @@ async fn files_upload(config: Config) -> Result<()> {
 
     // create a sync channel for processing *completed* items
     let sync_thread_db = db.clone();
-    let director = tokio::spawn(async move {
+    handles.push(tokio::spawn(async move {
         // convert rx to a ReceiverStream
         let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
         // prepare a batch for writing to the database to minimise IOPS
@@ -399,14 +401,15 @@ async fn files_upload(config: Config) -> Result<()> {
         ));
     });
 
-    let lim = RateLimiter::direct(Quota::per_second(
-        NonZeroU32::new(config.upload_rate).unwrap(),
-    ));
-
-    let uploader = tokio::spawn(async move {
+    let uploader_db = db.clone();
+    handles.push(tokio::spawn(async move {
         // set the node index and number of nodes uploading
         let node_id = config.node_id;
         let node_count = config.node_count;
+
+        let lim = RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(config.upload_rate).unwrap(),
+        ));
 
         let offset = 2 + config.path.len() + 1; // TODO: Can replace this index with a shorter index in future
 
@@ -416,7 +419,7 @@ async fn files_upload(config: Config) -> Result<()> {
                 println!("Node id {} uploading {}/{}", idx, idx+1, node_count);
             }
 
-            let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
+            let db_iter = tokio_stream::iter(uploader_db.scan_prefix(FILE_PREFIX.as_bytes()));
             tokio::pin!(db_iter);
 
             let mut to_upload = db_iter
@@ -453,7 +456,7 @@ async fn files_upload(config: Config) -> Result<()> {
                 drop(tokio_file);
 
                 // throttle the upload rate
-                lim.until_ready().await;
+                lim.until_ready_with_jitter(Jitter::new(Duration::from_millis(5), Duration::from_millis(50))).await;
 
                 // upload the file to the swarm
                 let hash = bee_api::bytes_post(
@@ -486,10 +489,11 @@ async fn files_upload(config: Config) -> Result<()> {
                 }
             }
         }
-    });
+    }));
 
-    director.await.unwrap();
-    uploader.await.unwrap();
+    futures::future::join_all(handles).await;
+
+    });
 
     Ok(())
 }
