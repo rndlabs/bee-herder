@@ -654,18 +654,36 @@ async fn migrate(config: Config) -> Result<()> {
             .filter_map(|item| {
                 let (key, value) = item.expect("Failed to read database");
                 let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
-                if file.status == HerdStatus::Uploaded {
+                if file.status == HerdStatus::Uploaded || (file.status == HerdStatus::Tagged && file.reference.is_some()) {
                     Some((file, key))
                 } else {
                     None
                 }
             });
+
+        // count the number of uploaded files
+        let mut count = 0;
+        let mut batch = sled::Batch::default();
         // for all in files, increment the number of uploaded files
-        for _ in files {
+        for (file, key) in files {
+            // set this file to uploaded status
+            let mut file = file;
+            file.status = HerdStatus::Uploaded;
+            batch.insert(key, bincode::serialize(&file).unwrap());
             num_uploaded += 1;
+
+            if count % 1000 == 0 {
+                batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap());
+                db.apply_batch(batch).expect("Failed to apply batch");
+                batch = sled::Batch::default();
+            }
+
+            count += 1;
         }
-        // set the number of uploaded files in the database
-        db.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap()).unwrap();
+
+        // write the num_uploaded to the database
+        batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap());
+        db.apply_batch(batch).expect("Failed to apply batch");
 
         println!("Migrated {} files", num_uploaded);
 
