@@ -1,7 +1,7 @@
 use bee_api::UploadConfig;
 use governor::{Quota, RateLimiter, Jitter};
 use indicatif::{ProgressBar, ProgressStyle};
-use mantaray::{persist::BeeLoadSaver, Entry, Manifest};
+use mantaray::{persist::{BeeLoadSaver,MockLoadSaver}, Entry, Manifest};
 use serde::{Deserialize, Serialize};
 use sled::IVec;
 use std::collections::BTreeMap;
@@ -10,6 +10,8 @@ use std::time::Duration;
 use std::{env, num::NonZeroU32};
 
 use std::sync::Arc;
+
+use url::Url;
 
 use thiserror::Error;
 
@@ -813,5 +815,17 @@ fn get_num(db: &sled::Db, key: HerdStatus) -> u64 {
     match db.get(bincode::serialize(&key).unwrap()) {
         Ok(Some(num)) => bincode::deserialize(&num).unwrap(),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod Test {
+    use super::*;
+    
+    #[test]
+    fn url_test() {
+        let path = "lkdsfjklsda/asdf/wer/index.html";
+        let url = url::Url::parse(&path).unwrap();
+        assert_eq!(url.path(), "lkdsfjklsda/asdf/wer/index.html");
     }
 }
