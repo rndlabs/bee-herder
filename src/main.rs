@@ -1,52 +1,22 @@
-use bee_herder::{run, Config};
-use clap::{App, Arg};
 use std::{error::Error, process};
+
+use bee_herder::{Cli, Commands, import, upload, manifest, migrate};
+use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let matches = App::new("bee_herder")
-        .version("0.1.0")
-        .about("Herding bees 🧲🐝")
-        .author("mfw78")
-        .arg(
-            Arg::with_name("mode")
-                .short('m')
-                .long("mode")
-                .value_name("MODE")
-                .help("Sets the mode to upload files or the index")
-                .takes_value(true)
-                .possible_values(&["import", "upload", "manifest", "refresh", "migrate"])
-                .required(true),
-        )
-        .arg(
-            Arg::with_name("path")
-                .long("path")
-                .value_name("PATH")
-                .help("The directory from which to upload files")
-                .takes_value(true)
-                .required(true),
-        )
-        .after_long_help(
-            "Environment variables: \n
-  - BEE_API_URL:        API URL for uploading to Swarm \n
-  - BEE_DEBUG_API_URL:  Debug API URL for Swarm \n
-  - POSTAGE_BATCH:      Stamp to be used for uploading to Swarm \n
-  - BEE_HERDER_DB:      The path to the leveldb database for co-ordinating \n
-  - UPLOAD_RATE:        The rate at which to upload files to Swarm (files per second) \n
-  - NODE_ID:            When multi-node uploading, specify the node ID to use \n
-  - NODE_COUNT:         When multi-node uploading, specify the number of nodes",
-        )
-        .get_matches();
-    // TODO: Write detailed usage instructions
-    //
 
-    let config = Config::new(matches).unwrap_or_else(|err| {
-        eprintln!("Problem parsing configuration variables: {}", err);
-        process::exit(1)
-    });
+    let cli = Cli::parse();
+
+    let res = match &cli.subcommand {
+        Commands::Import(import) => import::run(import).await,
+        Commands::Upload(upload) => upload::run(upload).await,
+        Commands::Manifest(manifest) => crate::manifest::run(manifest).await,
+        Commands::Migrate(migrate) => migrate::run(migrate).await,
+    };
 
     // run the program
-    if let Err(e) = run(config).await {
+    if let Err(e) = res {
         eprintln!("Application error: {}", e);
         process::exit(1);
     }
