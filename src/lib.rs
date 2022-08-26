@@ -781,7 +781,7 @@ async fn manifest_gen(config: Config) -> Result<()> {
             count += 1;
             pb.inc(1);
 
-            if count % 1000 == 0 {
+            if count % 4000 == 0 {
                 batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&(num_uploaded - count)).unwrap());
                 batch.insert(bincode::serialize(&HerdStatus::Syncing).unwrap(), bincode::serialize(&(num_syncing + count)).unwrap());
                 monitor_db.apply_batch(batch).expect("Failed to apply batch");
@@ -809,6 +809,7 @@ async fn manifest_gen(config: Config) -> Result<()> {
     }));
 
     // indexer thread for generating the manifest
+    let manifest_db = db.clone();
     handles.push(tokio::spawn(async move {
         tokio::pin!(db_iter);
         let mut to_index = db_iter
@@ -820,7 +821,17 @@ async fn manifest_gen(config: Config) -> Result<()> {
             .filter(|(file, _)| file.status == HerdStatus::Uploaded);
 
         let mut count = 0;
-        let mut manifest: Manifest = Manifest::new(Box::new(ls.clone()), false);
+
+        // if the manifest_root is set in the database, use that as the root for the manifest
+        let mut manifest = match manifest_db.get("manifest_root") {
+            Ok(Some(root)) => {
+                let root: Vec<u8> = bincode::deserialize(&root).unwrap();
+                Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap()
+            }
+            _ => {
+                Manifest::new(Box::new(ls.clone()), false)
+            }
+        };
 
         // consume the iterator
         while let Some((file, key)) = to_index.next().await {
@@ -843,11 +854,14 @@ async fn manifest_gen(config: Config) -> Result<()> {
 
             count += 1;
 
-            // for every 10000 items, save the manifest to dump out the forks
-            if count % 10000 == 0 {
+            // for every 4000 items, save the manifest to dump out the forks
+            if count % 4000 == 0 {
                 println!("Saving manifest at {}", count);
                 manifest.store().await.unwrap();
                 let ref_ = manifest.trie.ref_;
+
+                // set the manifest root in the database
+                manifest_db.insert("manifest_root", bincode::serialize(&ref_).unwrap()).unwrap();
 
                 // reset the manifest
                 manifest = Manifest::new_manifest_reference(ref_, Box::new(ls.clone())).unwrap();
