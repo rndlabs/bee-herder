@@ -663,11 +663,34 @@ async fn manifest_gen(config: Config) -> Result<()> {
     // hold beeloadsaver using arc
     let ls = Arc::new(BeeLoadSaver::new(
         config.bee_api.clone(),
+        bee_api::BeeConfig { upload: None },
+    ));
+
+    // check if there is a tag for the manifest
+    let manifest_tag = match db.get("manifest_tag") {
+        Ok(Some(tag)) => {
+            // if there is, deserialize it
+            bincode::deserialize(&tag).unwrap()
+        }
+        _ => {
+            // otherwise, create a new one
+            let tag = bee_api::tag_post(&ls.client, config.bee_api.clone())
+                .await
+                .unwrap();
+            // write the tag to the database
+            db.insert("manifest_tag", bincode::serialize(&tag).unwrap())
+                .unwrap();
+            tag
+        }
+    };
+
+    let ls = Arc::new(BeeLoadSaver::new(
+        config.bee_api.clone(),
         bee_api::BeeConfig {
             upload: Some(UploadConfig {
                 stamp: config.stamp.clone(),
                 pin: Some(true),
-                tag: None, // TODO!enable tag generation for upload tracking
+                tag: Some(manifest_tag.uid),
                 deferred: Some(true),
             }),
         },
@@ -680,7 +703,7 @@ async fn manifest_gen(config: Config) -> Result<()> {
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
-
+    
     pb.set_message("Building manifest");
 
     // create a sync channel for processing *completed* items
@@ -749,9 +772,13 @@ async fn manifest_gen(config: Config) -> Result<()> {
         // consume the iterator
         while let Some((file, key)) = to_index.next().await {
             // add to the manifest
+            // initial messy code to parse the prefix and ensure valid ascii path
+            let mut url: String = String::from("http://bee.org/");
+            url.push_str(&file.prefix);
+            let prefix = Url::parse(&url).unwrap().path().to_string()[1..].to_string();
             manifest
                 .add(
-                    &file.prefix,
+                    &prefix,
                     Entry {
                         reference: file.reference.as_ref().unwrap().clone(),
                         metadata: file.metadata.clone(),
@@ -786,7 +813,7 @@ async fn manifest_gen(config: Config) -> Result<()> {
         // save the manifest trie
         manifest.store().await.unwrap();
         let root = manifest.trie.ref_.clone();
-        println!("Manifest root: {:?}", hex::encode(&root));
+        println!("Manifest root uploaded at {:?} with monitoring on tag {}", hex::encode(&root), &manifest_tag.uid);
 
         println!("{}", manifest.trie.to_string());
 
