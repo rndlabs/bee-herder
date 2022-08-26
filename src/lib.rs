@@ -790,8 +790,8 @@ async fn manifest_gen(config: Config) -> Result<()> {
 
             count += 1;
 
-            // for every 1000 items, save the manifest to dump out the forks
-            if count % 1000 == 0 {
+            // for every 10000 items, save the manifest to dump out the forks
+            if count % 10000 == 0 {
                 println!("Saving manifest at {}", count);
                 manifest.store().await.unwrap();
                 let ref_ = manifest.trie.ref_;
