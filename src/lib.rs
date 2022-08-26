@@ -146,8 +146,7 @@ fn get_num(db: &sled::Db, key: HerdStatus) -> u64 {
 }
 
 #[cfg(test)]
-mod Test {
-    use super::*;
+mod test {
 
     #[test]
     fn url_test() {
