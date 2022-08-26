@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use url::Url;
 
-use crate::{FILE_PREFIX,Result, HerdStatus, get_num, HerdFile};
+use crate::{get_num, HerdFile, HerdStatus, Result, FILE_PREFIX};
 
 pub async fn run(config: &crate::Manifest) -> Result<()> {
     // log the start time of the upload
@@ -75,7 +75,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
-    
+
     pb.set_message("Building manifest");
 
     // create a sync channel for processing *completed* items
@@ -101,22 +101,38 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             pb.inc(1);
 
             if count % 4000 == 0 {
-                batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&(num_uploaded - count)).unwrap());
-                batch.insert(bincode::serialize(&HerdStatus::Syncing).unwrap(), bincode::serialize(&(num_syncing + count)).unwrap());
-                monitor_db.apply_batch(batch).expect("Failed to apply batch");
+                batch.insert(
+                    bincode::serialize(&HerdStatus::Uploaded).unwrap(),
+                    bincode::serialize(&(num_uploaded - count)).unwrap(),
+                );
+                batch.insert(
+                    bincode::serialize(&HerdStatus::Syncing).unwrap(),
+                    bincode::serialize(&(num_syncing + count)).unwrap(),
+                );
+                monitor_db
+                    .apply_batch(batch)
+                    .expect("Failed to apply batch");
                 batch = sled::Batch::default();
             }
         }
 
         // set the number of uploaded files in the database
         if num_uploaded - count > 0 {
-            batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&(num_uploaded - count)).unwrap());
+            batch.insert(
+                bincode::serialize(&HerdStatus::Uploaded).unwrap(),
+                bincode::serialize(&(num_uploaded - count)).unwrap(),
+            );
         } else {
             batch.remove(bincode::serialize(&HerdStatus::Uploaded).unwrap());
         }
         // set the number of syncing files in the database
-        batch.insert(bincode::serialize(&HerdStatus::Syncing).unwrap(), bincode::serialize(&(num_syncing + count)).unwrap());
-        monitor_db.apply_batch(batch).expect("Failed to apply batch");
+        batch.insert(
+            bincode::serialize(&HerdStatus::Syncing).unwrap(),
+            bincode::serialize(&(num_syncing + count)).unwrap(),
+        );
+        monitor_db
+            .apply_batch(batch)
+            .expect("Failed to apply batch");
 
         pb.finish_with_message(format!(
             "Processed {} items with {} failures in {:?}",
@@ -124,7 +140,6 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             failed,
             start.elapsed()
         ));
-
     }));
 
     // indexer thread for generating the manifest
@@ -147,9 +162,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
                 let root: Vec<u8> = bincode::deserialize(&root).unwrap();
                 mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap()
             }
-            _ => {
-                mantaray::Manifest::new(Box::new(ls.clone()), false)
-            }
+            _ => mantaray::Manifest::new(Box::new(ls.clone()), false),
         };
 
         // consume the iterator
@@ -180,10 +193,13 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
                 let ref_ = manifest.trie.ref_;
 
                 // set the manifest root in the database
-                manifest_db.insert("manifest_root", bincode::serialize(&ref_).unwrap()).unwrap();
+                manifest_db
+                    .insert("manifest_root", bincode::serialize(&ref_).unwrap())
+                    .unwrap();
 
                 // reset the manifest
-                manifest = mantaray::Manifest::new_manifest_reference(ref_, Box::new(ls.clone())).unwrap();
+                manifest =
+                    mantaray::Manifest::new_manifest_reference(ref_, Box::new(ls.clone())).unwrap();
             }
         }
 
@@ -199,7 +215,11 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         // save the manifest trie
         manifest.store().await.unwrap();
         let root = manifest.trie.ref_.clone();
-        println!("Manifest root uploaded at {:?} with monitoring on tag {}", hex::encode(&root), &manifest_tag.uid);
+        println!(
+            "Manifest root uploaded at {:?} with monitoring on tag {}",
+            hex::encode(&root),
+            &manifest_tag.uid
+        );
 
         println!("{}", manifest.trie.to_string());
 
@@ -210,4 +230,3 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
     Ok(())
 }
-

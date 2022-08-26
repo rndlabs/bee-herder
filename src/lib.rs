@@ -1,12 +1,12 @@
+use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::error;
-use clap::{Parser, Subcommand, Args};
 
 pub mod import;
-pub mod upload;
-pub mod migrate;
 pub mod manifest;
+pub mod migrate;
+pub mod upload;
 
 pub type Result<T> = std::result::Result<T, Box<dyn error::Error + Send>>;
 
@@ -79,15 +79,35 @@ pub struct Import {
 pub struct Upload {
     #[clap(long, value_parser, help = "Sets the path to the database to use")]
     db: String,
-    #[clap(value_parser, env = "BEE_API_URL", help = "Sets the URI of the Bee API to use")]
+    #[clap(
+        value_parser,
+        env = "BEE_API_URL",
+        help = "Sets the URI of the Bee API to use"
+    )]
     bee_api_uri: String,
-    #[clap(value_parser, env = "BEE_HERDER_BEE_POSTAGE_BATCH", help = "Which postage batch to use for uploading")]
+    #[clap(
+        value_parser,
+        env = "BEE_HERDER_BEE_POSTAGE_BATCH",
+        help = "Which postage batch to use for uploading"
+    )]
     bee_postage_batch: String,
-    #[clap(value_parser, env = "BEE_HERDER_UPLOAD_RATE", help = "Rate in files / sec when uploading")]
+    #[clap(
+        value_parser,
+        env = "BEE_HERDER_UPLOAD_RATE",
+        help = "Rate in files / sec when uploading"
+    )]
     upload_rate: Option<u32>,
-    #[clap(value_parser, env = "BEE_HERDER_NODE_ID", help = "The node ID when uploading using multiple nodes")]
+    #[clap(
+        value_parser,
+        env = "BEE_HERDER_NODE_ID",
+        help = "The node ID when uploading using multiple nodes"
+    )]
     node_id: Option<u32>,
-    #[clap(value_parser, env = "BEE_HERDER_NODE_COUNT", help = "The total number of nodes in use when uploading using multiple nodes")]
+    #[clap(
+        value_parser,
+        env = "BEE_HERDER_NODE_COUNT",
+        help = "The total number of nodes in use when uploading using multiple nodes"
+    )]
     node_count: Option<u32>,
 }
 
@@ -95,9 +115,17 @@ pub struct Upload {
 pub struct Manifest {
     #[clap(long, value_parser, help = "Sets the path to the database to use")]
     db: String,
-    #[clap(value_parser, env = "BEE_API_URL", help = "Sets the URI of the Bee API to use")]
+    #[clap(
+        value_parser,
+        env = "BEE_API_URL",
+        help = "Sets the URI of the Bee API to use"
+    )]
     bee_api_uri: String,
-    #[clap(value_parser, env = "BEE_HERDER_BEE_POSTAGE_BATCH", help = "Which postage batch to use for uploading")]
+    #[clap(
+        value_parser,
+        env = "BEE_HERDER_BEE_POSTAGE_BATCH",
+        help = "Which postage batch to use for uploading"
+    )]
     bee_postage_batch: String,
     // #[clap(value_parser, help = "Prefices that should be parallelized")]
     // parallel_prefixes: Vec<String>,
@@ -120,7 +148,7 @@ fn get_num(db: &sled::Db, key: HerdStatus) -> u64 {
 #[cfg(test)]
 mod Test {
     use super::*;
-    
+
     #[test]
     fn url_test() {
         let path = "lkdsfjklsda/asdf/wer/index.html";

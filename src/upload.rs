@@ -1,12 +1,12 @@
 use std::{num::NonZeroU32, time::Duration};
 
 use bee_api::UploadConfig;
-use governor::{RateLimiter, Quota, Jitter};
+use governor::{Jitter, Quota, RateLimiter};
 use indicatif::{ProgressBar, ProgressStyle};
-use tokio::{sync::mpsc, fs::File, io::AsyncReadExt};
+use tokio::{fs::File, io::AsyncReadExt, sync::mpsc};
 use tokio_stream::StreamExt;
 
-use crate::{HerdStatus,Result, get_num, HerdFile, FILE_PREFIX, Upload};
+use crate::{get_num, HerdFile, HerdStatus, Result, Upload, FILE_PREFIX};
 
 const NUM_UPLOAD_TAGS: usize = 100;
 
@@ -21,7 +21,7 @@ pub async fn run(config: &Upload) -> Result<()> {
 
     // if there are pending files, make sure they are tagged
     if get_num(&db, HerdStatus::Pending) > 0 {
-        tagger(&db, &client, &config).await?;
+        tagger(&db, &client, config).await?;
     }
 
     // read current number of pending entries
@@ -118,7 +118,6 @@ pub async fn run(config: &Upload) -> Result<()> {
         ));
     }));
 
-
     let uploader_db = db.clone();
     let config = config.clone();
     handles.push(tokio::spawn(async move {
@@ -134,7 +133,7 @@ pub async fn run(config: &Upload) -> Result<()> {
         for i in 0..node_count {
             let idx = (node_id + i) % node_count;
             if node_count > 1 {
-                println!("Node id {} uploading {}/{}", idx, idx+1, node_count);
+                println!("Node id {} uploading {}/{}", idx, idx + 1, node_count);
             }
 
             let db_iter = tokio_stream::iter(uploader_db.scan_prefix(FILE_PREFIX.as_bytes()));
@@ -174,7 +173,11 @@ pub async fn run(config: &Upload) -> Result<()> {
                 drop(tokio_file);
 
                 // throttle the upload rate
-                lim.until_ready_with_jitter(Jitter::new(Duration::from_millis(5), Duration::from_millis(50))).await;
+                lim.until_ready_with_jitter(Jitter::new(
+                    Duration::from_millis(5),
+                    Duration::from_millis(50),
+                ))
+                .await;
 
                 // upload the file to the swarm
                 let hash = bee_api::bytes_post(
@@ -216,8 +219,7 @@ pub async fn run(config: &Upload) -> Result<()> {
     db.scan_prefix(FILE_PREFIX.as_bytes())
         .map(|item| {
             let (key, value) = item.expect("Failed to read database");
-            let file: HerdFile =
-                bincode::deserialize(&value).expect("Failed to deserialize");
+            let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
             (file, key)
         })
         .filter(|(file, _)| file.status == HerdStatus::Tagged)
@@ -230,11 +232,7 @@ pub async fn run(config: &Upload) -> Result<()> {
 
 // generate tags in batches.
 // just iterate over the files and generate a tag for each 100 files
-async fn tagger(
-    db: &sled::Db,
-    client: &reqwest::Client,
-    config: &Upload,
-) -> Result<()> {
+async fn tagger(db: &sled::Db, client: &reqwest::Client, config: &Upload) -> Result<()> {
     // attempt to retrieve the hashmap from the db
     let index: Vec<u32> = match db.get("cluster_to_tag_index") {
         Ok(Some(index)) => {
@@ -321,9 +319,15 @@ async fn tagger(
         batch.insert(key, bincode::serialize(&file).unwrap());
 
         if i % 1000 == 0 {
-            batch.insert(bincode::serialize(&HerdStatus::Tagged).unwrap(), bincode::serialize(&(num_tagged + count)).unwrap());
+            batch.insert(
+                bincode::serialize(&HerdStatus::Tagged).unwrap(),
+                bincode::serialize(&(num_tagged + count)).unwrap(),
+            );
             // todo: should guard against the case where the total size is 1000 and num_pending becomes 0
-            batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&(num_pending - count)).unwrap());
+            batch.insert(
+                bincode::serialize(&HerdStatus::Pending).unwrap(),
+                bincode::serialize(&(num_pending - count)).unwrap(),
+            );
             db.apply_batch(batch).expect("Failed to apply batch");
             batch = sled::Batch::default();
         }
@@ -333,9 +337,15 @@ async fn tagger(
     }
 
     // set the number of tagged files in the database
-    batch.insert(bincode::serialize(&HerdStatus::Tagged).unwrap(), bincode::serialize(&(num_tagged + count)).unwrap());
+    batch.insert(
+        bincode::serialize(&HerdStatus::Tagged).unwrap(),
+        bincode::serialize(&(num_tagged + count)).unwrap(),
+    );
     if num_pending - count > 0 {
-        batch.insert(bincode::serialize(&HerdStatus::Pending).unwrap(), bincode::serialize(&(num_pending - count)).unwrap());
+        batch.insert(
+            bincode::serialize(&HerdStatus::Pending).unwrap(),
+            bincode::serialize(&(num_pending - count)).unwrap(),
+        );
     } else {
         batch.remove(bincode::serialize(&HerdStatus::Pending).unwrap());
     }

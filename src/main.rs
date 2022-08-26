@@ -1,11 +1,10 @@
 use std::{error::Error, process};
 
-use bee_herder::{Cli, Commands, import, upload, manifest, migrate};
+use bee_herder::{import, manifest, migrate, upload, Cli, Commands};
 use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-
     let cli = Cli::parse();
 
     let res = match &cli.subcommand {

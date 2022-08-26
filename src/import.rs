@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Result, HerdStatus, get_num, HerdFile, Import};
+use crate::{get_num, HerdFile, HerdStatus, Import, Result};
 
 pub async fn run(config: &Import) -> Result<()> {
     let db = sled::open(&config.db).expect("Unable to open database");
@@ -86,7 +86,7 @@ pub async fn run(config: &Import) -> Result<()> {
 
         let herd_file = HerdFile {
             file_path, // absolute file path
-            prefix, // should be relative to the path specified in the config
+            prefix,    // should be relative to the path specified in the config
             status: HerdStatus::Pending,
             tag: None,
             reference: None,
