@@ -1,12 +1,17 @@
 use bee_api::UploadConfig;
-use governor::{Quota, RateLimiter};
+use governor::{Quota, RateLimiter, Jitter};
 use indicatif::{ProgressBar, ProgressStyle};
-use mantaray::{persist::BeeLoadSaver, Entry, Manifest};
+use mantaray::{persist::{BeeLoadSaver,MockLoadSaver}, Entry, Manifest};
 use serde::{Deserialize, Serialize};
+use sled::IVec;
+use std::collections::BTreeMap;
 use std::error;
-use std::{collections::HashMap, env, num::NonZeroU32};
+use std::time::Duration;
+use std::{env, num::NonZeroU32};
 
 use std::sync::Arc;
+
+use url::Url;
 
 use thiserror::Error;
 
@@ -48,7 +53,7 @@ pub struct HerdFile {
     pub tag: Option<u32>,
     pub reference: Option<Vec<u8>>,
     pub mantaray_reference: Option<Vec<u8>>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -233,7 +238,7 @@ async fn import_dir(config: Config) -> Result<()> {
         // print the file path
         println!("Importing {} as {}", file_path, prefix);
 
-        let mut metadata = HashMap::new();
+        let mut metadata = BTreeMap::new();
         let content_type = match file_path.split(".").last() {
             Some("png") => "image/png",
             Some("jpg") => "image/jpeg",
@@ -299,6 +304,7 @@ async fn files_upload(config: Config) -> Result<()> {
     let start = std::time::Instant::now();
 
     let db = sled::open(&config.db).unwrap();
+    let mut handles = Vec::new();
 
     // if there are pending files, make sure they are tagged
     if get_num(&db, HerdStatus::Pending) > 0 {
@@ -327,7 +333,7 @@ async fn files_upload(config: Config) -> Result<()> {
 
     // create a sync channel for processing *completed* items
     let sync_thread_db = db.clone();
-    let director = tokio::spawn(async move {
+    handles.push(tokio::spawn(async move {
         // convert rx to a ReceiverStream
         let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
         // prepare a batch for writing to the database to minimise IOPS
@@ -397,18 +403,19 @@ async fn files_upload(config: Config) -> Result<()> {
             failed,
             start.elapsed().as_secs()
         ));
-    });
+    }));
 
-    let lim = RateLimiter::direct(Quota::per_second(
-        NonZeroU32::new(config.upload_rate).unwrap(),
-    ));
-
-    let uploader = tokio::spawn(async move {
+    let uploader_db = db.clone();
+    handles.push(tokio::spawn(async move {
         // set the node index and number of nodes uploading
         let node_id = config.node_id;
         let node_count = config.node_count;
 
-        let offset = 2 + config.path.len() + 1; // TODO: Can replace this index with a shorter index in future
+        let lim = RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(config.upload_rate).unwrap(),
+        ));
+
+        // let offset = 2 + config.path.len() + 1; // TODO: Can replace this index with a shorter index in future
 
         for i in 0..node_count {
             let idx = (node_id + i) % node_count;
@@ -416,7 +423,7 @@ async fn files_upload(config: Config) -> Result<()> {
                 println!("Node id {} uploading {}/{}", idx, idx+1, node_count);
             }
 
-            let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
+            let db_iter = tokio_stream::iter(uploader_db.scan_prefix(FILE_PREFIX.as_bytes()));
             tokio::pin!(db_iter);
 
             let mut to_upload = db_iter
@@ -453,7 +460,7 @@ async fn files_upload(config: Config) -> Result<()> {
                 drop(tokio_file);
 
                 // throttle the upload rate
-                lim.until_ready().await;
+                lim.until_ready_with_jitter(Jitter::new(Duration::from_millis(5), Duration::from_millis(50))).await;
 
                 // upload the file to the swarm
                 let hash = bee_api::bytes_post(
@@ -486,10 +493,23 @@ async fn files_upload(config: Config) -> Result<()> {
                 }
             }
         }
-    });
+    }));
 
-    director.await.unwrap();
-    uploader.await.unwrap();
+    futures::future::join_all(handles).await;
+
+    // At this point all files have been uploaded, so let's check if there are any files that need to be uploaded
+    // again
+    db.scan_prefix(FILE_PREFIX.as_bytes())
+        .map(|item| {
+            let (key, value) = item.expect("Failed to read database");
+            let file: HerdFile =
+                bincode::deserialize(&value).expect("Failed to deserialize");
+            (file, key)
+        })
+        .filter(|(file, _)| file.status == HerdStatus::Tagged)
+        .for_each(|(file, _)| {
+            println!("Failed to upload {:?}", file);
+        });
 
     Ok(())
 }
@@ -623,44 +643,120 @@ async fn manifest_gen(config: Config) -> Result<()> {
     let start = std::time::Instant::now();
 
     let db = sled::open(&config.db).unwrap();
+    let mut handles = Vec::new();
+
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
 
     // read current number of pending entries
-    let num_uploaded = match db
-        .get(bincode::serialize(&HerdStatus::Uploaded).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
+    let num_uploaded = get_num(&db, HerdStatus::Uploaded);
+
+    // if there are no uploading files, return
+    if num_uploaded == 0 {
+        println!("No files to index");
+        return Ok(());
+    }
 
     // read current number of in syncing status
-    let num_syncing = match db
-        .get(bincode::serialize(&HerdStatus::Syncing).unwrap())
-        .unwrap()
-    {
-        Some(b) => bincode::deserialize(&b).unwrap(),
-        None => 0,
-    };
+    let num_syncing = get_num(&db, HerdStatus::Syncing);
 
     // create static variable to hold beeloadsaver
     // hold beeloadsaver using arc
-    let beeloadsaver = Arc::new(BeeLoadSaver::new(
+    let ls = Arc::new(BeeLoadSaver::new(
+        config.bee_api.clone(),
+        bee_api::BeeConfig { upload: None },
+    ));
+
+    // check if there is a tag for the manifest
+    let manifest_tag = match db.get("manifest_tag") {
+        Ok(Some(tag)) => {
+            // if there is, deserialize it
+            bincode::deserialize(&tag).unwrap()
+        }
+        _ => {
+            // otherwise, create a new one
+            let tag = bee_api::tag_post(&ls.client, config.bee_api.clone())
+                .await
+                .unwrap();
+            // write the tag to the database
+            db.insert("manifest_tag", bincode::serialize(&tag).unwrap())
+                .unwrap();
+            tag
+        }
+    };
+
+    let ls = Arc::new(BeeLoadSaver::new(
         config.bee_api.clone(),
         bee_api::BeeConfig {
             upload: Some(UploadConfig {
                 stamp: config.stamp.clone(),
                 pin: Some(true),
-                tag: None, // TODO!enable tag generation for upload tracking
+                tag: Some(manifest_tag.uid),
                 deferred: Some(true),
             }),
         },
     ));
 
-    let mut manifest: Manifest = Manifest::new(Box::new(beeloadsaver), false);
-    manifest.trie.obfuscation_key = [0u8; 32].to_vec();
+    // a thread to monitor the progress of the indexer
+    let (tx, rx) = mpsc::channel::<Result<(HerdFile, IVec)>>(100);
 
-    let indexer = tokio::spawn(async move {
+    let pb = ProgressBar::new(num_uploaded);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
+        .progress_chars("#>-"));
+    
+    pb.set_message("Building manifest");
+
+    // create a sync channel for processing *completed* items
+    let monitor_db = db.clone();
+    handles.push(tokio::spawn(async move {
+        // convert rx to a ReceiverStream
+        let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
+        // consume the channel
+        let mut count = 0;
+        let mut failed = 0;
+        let mut batch = sled::Batch::default();
+        while let Some(result) = rx.next().await {
+            if result.is_err() {
+                failed += 1;
+            } else {
+                // set the status of the file to syncing
+                let (mut file, key) = result.unwrap();
+                file.status = HerdStatus::Syncing;
+                batch.insert(key, bincode::serialize(&file).unwrap());
+            }
+
+            count += 1;
+            pb.inc(1);
+
+            if count % 1000 == 0 {
+                batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&(num_uploaded - count)).unwrap());
+                batch.insert(bincode::serialize(&HerdStatus::Syncing).unwrap(), bincode::serialize(&(num_syncing + count)).unwrap());
+                monitor_db.apply_batch(batch).expect("Failed to apply batch");
+                batch = sled::Batch::default();
+            }
+        }
+
+        // set the number of uploaded files in the database
+        if num_uploaded - count > 0 {
+            batch.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&(num_uploaded - count)).unwrap());
+        } else {
+            batch.remove(bincode::serialize(&HerdStatus::Uploaded).unwrap());
+        }
+        // set the number of syncing files in the database
+        batch.insert(bincode::serialize(&HerdStatus::Syncing).unwrap(), bincode::serialize(&(num_syncing + count)).unwrap());
+        monitor_db.apply_batch(batch).expect("Failed to apply batch");
+
+        pb.finish_with_message(format!(
+            "Processed {} items with {} failures in {:?}",
+            count,
+            failed,
+            start.elapsed()
+        ));
+
+    }));
+
+    // indexer thread for generating the manifest
+    handles.push(tokio::spawn(async move {
         tokio::pin!(db_iter);
         let mut to_index = db_iter
             .map(|item| {
@@ -670,36 +766,62 @@ async fn manifest_gen(config: Config) -> Result<()> {
             })
             .filter(|(file, _)| file.status == HerdStatus::Uploaded);
 
+        let mut count = 0;
+        let mut manifest: Manifest = Manifest::new(Box::new(ls.clone()), false);
+
         // consume the iterator
         while let Some((file, key)) = to_index.next().await {
             // add to the manifest
+            // initial messy code to parse the prefix and ensure valid ascii path
+            let mut url: String = String::from("http://bee.org/");
+            url.push_str(&file.prefix);
+            let prefix = Url::parse(&url).unwrap().path().to_string()[1..].to_string();
             manifest
                 .add(
-                    &file.prefix,
+                    &prefix,
                     Entry {
-                        reference: file.reference.unwrap(),
-                        metadata: file.metadata,
+                        reference: file.reference.as_ref().unwrap().clone(),
+                        metadata: file.metadata.clone(),
                     },
                 )
                 .await
                 .unwrap();
+            tx.send(Ok((file, key))).await.unwrap();
+
+            count += 1;
+
+            // for every 10000 items, save the manifest to dump out the forks
+            if count % 10000 == 0 {
+                println!("Saving manifest at {}", count);
+                manifest.store().await.unwrap();
+                let ref_ = manifest.trie.ref_;
+
+                // reset the manifest
+                manifest = Manifest::new_manifest_reference(ref_, Box::new(ls.clone())).unwrap();
+            }
         }
 
         // set metadata
-        let mut metadata = HashMap::new();
+        let mut metadata = BTreeMap::new();
         metadata.insert(
             String::from("website-index-document"),
-            String::from("wiki/index"),
+            String::from("index.html"),
         );
 
         manifest.set_root(metadata).await.unwrap();
 
         // save the manifest trie
-        manifest.save().await.unwrap();
-        println!("Manifest root: {:?}", hex::encode(manifest.trie.ref_));
-    });
+        manifest.store().await.unwrap();
+        let root = manifest.trie.ref_.clone();
+        println!("Manifest root uploaded at {:?} with monitoring on tag {}", hex::encode(&root), &manifest_tag.uid);
 
-    indexer.await.unwrap();
+        println!("{}", manifest.trie.to_string());
+
+        println!("Processed {} files", count);
+    }));
+
+    futures::future::join_all(handles).await;
+
     Ok(())
 }
 
@@ -720,5 +842,17 @@ fn get_num(db: &sled::Db, key: HerdStatus) -> u64 {
     match db.get(bincode::serialize(&key).unwrap()) {
         Ok(Some(num)) => bincode::deserialize(&num).unwrap(),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod Test {
+    use super::*;
+    
+    #[test]
+    fn url_test() {
+        let path = "lkdsfjklsda/asdf/wer/index.html";
+        let url = url::Url::parse(&path).unwrap();
+        assert_eq!(url.path(), "lkdsfjklsda/asdf/wer/index.html");
     }
 }
