@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .value_name("MODE")
                 .help("Sets the mode to upload files or the index")
                 .takes_value(true)
-                .possible_values(&["import", "upload", "manifest", "refresh"])
+                .possible_values(&["import", "upload", "manifest", "refresh", "migrate"])
                 .required(true),
         )
         .arg(

@@ -67,6 +67,7 @@ pub enum HerdMode {
     Upload,
     Manifest,
     Refresh,
+    Migrate,
 }
 
 pub struct Config {
@@ -88,6 +89,7 @@ impl Config {
             "upload" => HerdMode::Upload,
             "manifest" => HerdMode::Manifest,
             "refresh" => HerdMode::Refresh,
+            "migrate" => HerdMode::Migrate,
             _ => return Err(Box::new(BeeHerderError::InvalidMode)),
         };
         let path = matches.value_of("path").unwrap().to_string();
@@ -638,6 +640,39 @@ async fn tagger(
     Ok(())
 }
 
+async fn migrate(config: Config) -> Result<()> {
+    // connect to the database
+    let db = sled::open(config.db).unwrap();
+
+    // migration required - number of uploaded files wasn't record, let's fix that
+    if get_num(&db, HerdStatus::Uploaded) == 0 {
+        let mut num_uploaded = get_num(&db, HerdStatus::Uploaded);
+
+        // get all files from the database that are of status uploaded
+        let files = db
+            .scan_prefix(FILE_PREFIX.as_bytes())
+            .filter_map(|item| {
+                let (key, value) = item.expect("Failed to read database");
+                let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
+                if file.status == HerdStatus::Uploaded {
+                    Some((file, key))
+                } else {
+                    None
+                }
+            });
+        // for all in files, increment the number of uploaded files
+        for _ in files {
+            num_uploaded += 1;
+        }
+        // set the number of uploaded files in the database
+        db.insert(bincode::serialize(&HerdStatus::Uploaded).unwrap(), bincode::serialize(&num_uploaded).unwrap()).unwrap();
+
+        println!("Migrated {} files", num_uploaded);
+
+    }
+    Ok(())
+}
+
 async fn manifest_gen(config: Config) -> Result<()> {
     // log the start time of the upload
     let start = std::time::Instant::now();
@@ -832,6 +867,7 @@ pub async fn run(config: Config) -> Result<()> {
         HerdMode::Upload => files_upload(config).await?,
         HerdMode::Manifest => manifest_gen(config).await?,
         HerdMode::Refresh => todo!(),
+        HerdMode::Migrate => migrate(config).await?,
     };
 
     Ok(())
