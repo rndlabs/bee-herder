@@ -15,11 +15,8 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     let start = std::time::Instant::now();
 
     let db = sled::open(&config.db).unwrap();
-    let mut handles = Vec::new();
 
-    let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()));
-
-    // read current number of pending entries
+    // read current number of uploaded entries
     let num_uploaded = get_num(&db, HerdStatus::Uploaded);
 
     // if there are no uploading files, return
@@ -28,7 +25,14 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         return Ok(());
     }
 
-    // read current number of in syncing status
+    // process all prefixes to be valid prefixes
+    url_to_ascii(&db).await;
+
+    let mut handles = Vec::new();
+    let db_iter = tokio_stream::iter(db.scan_prefix(&FILE_PREFIX.as_bytes()));
+
+    // read current number of url processed entries and syncing entries
+    let num_url_processed = get_num(&db, HerdStatus::UrlProcessed);
     let num_syncing = get_num(&db, HerdStatus::Syncing);
 
     // create static variable to hold beeloadsaver
@@ -71,7 +75,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     // a thread to monitor the progress of the indexer
     let (tx, rx) = mpsc::channel::<Result<(HerdFile, IVec)>>(100);
 
-    let pb = ProgressBar::new(num_uploaded);
+    let pb = ProgressBar::new(num_url_processed as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
         .progress_chars("#>-"));
@@ -102,8 +106,8 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
             if count % 4000 == 0 {
                 batch.insert(
-                    bincode::serialize(&HerdStatus::Uploaded).unwrap(),
-                    bincode::serialize(&(num_uploaded - count)).unwrap(),
+                    bincode::serialize(&HerdStatus::UrlProcessed).unwrap(),
+                    bincode::serialize(&(num_url_processed - count)).unwrap(),
                 );
                 batch.insert(
                     bincode::serialize(&HerdStatus::Syncing).unwrap(),
@@ -117,13 +121,13 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         }
 
         // set the number of uploaded files in the database
-        if num_uploaded - count > 0 {
+        if num_url_processed - count > 0 {
             batch.insert(
-                bincode::serialize(&HerdStatus::Uploaded).unwrap(),
-                bincode::serialize(&(num_uploaded - count)).unwrap(),
+                bincode::serialize(&HerdStatus::UrlProcessed).unwrap(),
+                bincode::serialize(&(num_url_processed - count)).unwrap(),
             );
         } else {
-            batch.remove(bincode::serialize(&HerdStatus::Uploaded).unwrap());
+            batch.remove(bincode::serialize(&HerdStatus::UrlProcessed).unwrap());
         }
         // set the number of syncing files in the database
         batch.insert(
@@ -152,7 +156,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
                 let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
                 (file, key)
             })
-            .filter(|(file, _)| file.status == HerdStatus::Uploaded);
+            .filter(|(file, _)| file.status == HerdStatus::UrlProcessed);
 
         let mut count = 0;
 
@@ -169,12 +173,9 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         while let Some((file, key)) = to_index.next().await {
             // add to the manifest
             // initial messy code to parse the prefix and ensure valid ascii path
-            let mut url: String = String::from("http://bee.org/");
-            url.push_str(&file.prefix);
-            let prefix = Url::parse(&url).unwrap().path().to_string()[1..].to_string();
             manifest
                 .add(
-                    &prefix,
+                    &file.prefix,
                     Entry {
                         reference: file.reference.as_ref().unwrap().clone(),
                         metadata: file.metadata.clone(),
@@ -229,4 +230,72 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     futures::future::join_all(handles).await;
 
     Ok(())
+}
+
+async fn url_to_ascii(db: &sled::Db) {
+    let mut db_iter = db.scan_prefix(&FILE_PREFIX.as_bytes())
+        .map(|item| {
+            let (key, value) = item.expect("Failed to read database");
+            let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
+            (file, key)
+        })
+        .filter(|(file, _)| file.status == HerdStatus::Uploaded && !file.metadata.get("Content-Type").unwrap().contains("application/octet-stream+xapian"));
+    let mut count = 0;
+    let mut batch = sled::Batch::default();
+    let num_uploaded = get_num(&db, HerdStatus::Uploaded);
+    let num_url_processed = get_num(&db, HerdStatus::UrlProcessed);
+    let pb = ProgressBar::new(num_uploaded);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
+        .progress_chars("#>-"));
+
+    pb.set_message("Processing URLs");
+
+    while let Some(item) = db_iter.next() {
+        let (mut file, key) = item;
+        let mut url: String = String::from("http://bee.org/");
+        url.push_str(&file.prefix);
+        file.prefix = Url::parse(&url).unwrap().path().to_string()[1..].to_string();
+        file.status = HerdStatus::UrlProcessed;
+        batch.insert(key, bincode::serialize(&file).unwrap());
+        // println!("{:?}", file);
+        count += 1;
+        pb.inc(1);
+        if count % 10000 == 0 {
+            // set the number of uploaded files in the database
+            if num_uploaded - count > 0 {
+                batch.insert(
+                    bincode::serialize(&HerdStatus::Uploaded).unwrap(),
+                    bincode::serialize(&(num_uploaded - count)).unwrap(),
+                );
+            } else {
+                batch.remove(bincode::serialize(&HerdStatus::Uploaded).unwrap());
+            }
+
+            // set the number of url processed files in the database
+            batch.insert(
+                bincode::serialize(&HerdStatus::UrlProcessed).unwrap(),
+                bincode::serialize(&(num_url_processed + count)).unwrap(),
+            );
+            db.apply_batch(batch).unwrap();
+            batch = sled::Batch::default();
+        }
+    }
+    // set the number of uploaded files in the database
+    if num_uploaded - count > 0 {
+        batch.insert(
+            bincode::serialize(&HerdStatus::Uploaded).unwrap(),
+            bincode::serialize(&(num_uploaded - count)).unwrap(),
+        );
+    } else {
+        batch.remove(bincode::serialize(&HerdStatus::Uploaded).unwrap());
+    }
+    // set the number of url processed files in the database
+    batch.insert(
+        bincode::serialize(&HerdStatus::UrlProcessed).unwrap(),
+        bincode::serialize(&(num_url_processed + count)).unwrap(),
+    );
+    db.apply_batch(batch).unwrap();
+
+    pb.finish_with_message(format!("Processed {} URLs", count));
 }
