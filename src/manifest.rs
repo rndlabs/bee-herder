@@ -1,4 +1,7 @@
-use std::{collections::{BTreeMap, HashMap}, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use bee_api::UploadConfig;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -145,9 +148,9 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
     // indexer thread for generating the manifest
     handles.push(tokio::spawn(async move {
-        
         let root = indexer(&db, "".to_string(), ls.clone(), tx).await.unwrap();
-        let mut manifest = mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap();
+        let mut manifest =
+            mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap();
 
         // set metadata
         let mut metadata = BTreeMap::new();
@@ -175,9 +178,14 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     Ok(())
 }
 
-async fn indexer(db: &sled::Db, prefix: String, ls: Arc<BeeLoadSaver>, tx: Sender<std::result::Result<(Batch, u64), Box<dyn std::error::Error + Send>>>) -> Result<Vec<u8>> {
+async fn indexer(
+    db: &sled::Db,
+    prefix: String,
+    ls: Arc<BeeLoadSaver>,
+    tx: Sender<std::result::Result<(Batch, u64), Box<dyn std::error::Error + Send>>>,
+) -> Result<Vec<u8>> {
     // create a manifest root key for this prefix
-    let manifest_key = match prefix.as_str() == ""{
+    let manifest_key = match prefix.as_str() == "" {
         false => format!("manifest_root_{}", prefix),
         true => "manifest_root".to_string(),
     };
@@ -194,7 +202,8 @@ async fn indexer(db: &sled::Db, prefix: String, ls: Arc<BeeLoadSaver>, tx: Sende
     let mut count = 0;
     let mut count_in_batch = 0;
     let mut batch = sled::Batch::default();
-    let db_iter = tokio_stream::iter(db.scan_prefix(format!("{}{}", FILE_PREFIX, prefix).as_bytes()));
+    let db_iter =
+        tokio_stream::iter(db.scan_prefix(format!("{}{}", FILE_PREFIX, prefix).as_bytes()));
     tokio::pin!(db_iter);
     while let Some(value) = db_iter.next().await {
         let (key, value) = value.expect("Failed to read database");
@@ -217,7 +226,9 @@ async fn indexer(db: &sled::Db, prefix: String, ls: Arc<BeeLoadSaver>, tx: Sende
             if count % 500 == 0 {
                 manifest.store().await.unwrap();
                 let ref_ = manifest.trie.ref_;
-                manifest = mantaray::Manifest::new_manifest_reference(ref_.clone(), Box::new(ls.clone())).unwrap();
+                manifest =
+                    mantaray::Manifest::new_manifest_reference(ref_.clone(), Box::new(ls.clone()))
+                        .unwrap();
 
                 // set the manifest root in the database
                 batch.insert(
@@ -239,7 +250,7 @@ async fn indexer(db: &sled::Db, prefix: String, ls: Arc<BeeLoadSaver>, tx: Sende
         bincode::serialize(&ref_).unwrap(),
     );
     tx.send(Ok((batch, count_in_batch))).await.unwrap();
-    
+
     Ok(ref_)
 }
 
@@ -249,7 +260,8 @@ fn prefixes(db: &sled::Db, common: String) -> Vec<u8> {
     let mut prefixes: HashMap<u8, u32> = HashMap::new();
 
     // iterate through the database and collect the first character of all file prefies excluding the common prefix
-    let iter = db.scan_prefix(&FILE_PREFIX.as_bytes())
+    let iter = db
+        .scan_prefix(&FILE_PREFIX.as_bytes())
         .map(|item| {
             let (_, value) = item.expect("Failed to read database");
             let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");
@@ -274,7 +286,8 @@ fn prefixes(db: &sled::Db, common: String) -> Vec<u8> {
 }
 
 fn url_to_ascii(db: &sled::Db) {
-    let db_iter = db.scan_prefix(&FILE_PREFIX.as_bytes())
+    let db_iter = db
+        .scan_prefix(&FILE_PREFIX.as_bytes())
         .map(|item| {
             let (key, value) = item.expect("Failed to read database");
             let file: HerdFile = bincode::deserialize(&value).expect("Failed to deserialize");

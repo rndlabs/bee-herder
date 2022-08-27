@@ -38,7 +38,8 @@ pub async fn run(config: &Migrate) -> Result<()> {
             } else {
                 batch.remove(key);
                 file.status = HerdStatus::Uploaded;
-                let key = bincode::serialize(format!("{}{}", FILE_PREFIX, file.prefix).as_bytes()).unwrap();
+                let key = bincode::serialize(format!("{}{}", FILE_PREFIX, file.prefix).as_bytes())
+                    .unwrap();
                 batch.insert(key, bincode::serialize(&file).unwrap());
                 num_uploaded += 1;
             }
@@ -60,7 +61,10 @@ pub async fn run(config: &Migrate) -> Result<()> {
         );
         db.apply_batch(batch).expect("Failed to apply batch");
 
-        println!("Migrated {} and removed {} files", num_uploaded, num_removed);
+        println!(
+            "Migrated {} and removed {} files",
+            num_uploaded, num_removed
+        );
     }
     Ok(())
 }
