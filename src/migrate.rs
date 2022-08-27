@@ -36,7 +36,9 @@ pub async fn run(config: &Migrate) -> Result<()> {
                 batch.remove(key);
                 num_removed += 1;
             } else {
+                batch.remove(key);
                 file.status = HerdStatus::Uploaded;
+                let key = bincode::serialize(format!("{}{}", FILE_PREFIX, file.prefix).as_bytes()).unwrap();
                 batch.insert(key, bincode::serialize(&file).unwrap());
                 num_uploaded += 1;
             }
