@@ -12,7 +12,7 @@ use mantaray::{
     // walker::walk_node,
 };
 use sled::Batch;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::{sync::mpsc::{self, Sender}, runtime::Builder};
 use tokio_stream::StreamExt;
 use url::Url;
 
@@ -147,6 +147,12 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         ));
     }));
 
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_name("herd")
+        .build()
+        .unwrap();
+
     // first use all the hints to process the prefixes
     for p in &config.parallel_prefixes {
         // iterate over the common prefixes and process them
@@ -168,7 +174,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             let mut prefix = p.clone();
             prefix.push(c.into());
             let batch_size = config.batch_size.clone();
-            parallel_handles.push(tokio::spawn(async move {
+            parallel_handles.push(runtime.spawn(async move {
                 let root = indexer(&db, prefix.clone(), batch_size, ls, tx).await.unwrap();
                 // println!("prefix: {} c: {} ref: {:?}", prefix, c, hex::encode(&root));
                 (p, c, root)
