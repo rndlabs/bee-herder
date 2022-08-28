@@ -203,7 +203,11 @@ async fn indexer(
     let mut count_in_batch = 0;
     let mut batch = sled::Batch::default();
     let db_iter =
-        tokio_stream::iter(db.scan_prefix(format!("{}{}", FILE_PREFIX, prefix).as_bytes()));
+        tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()).filter(|item| {
+            let (_, file) = item.as_ref().unwrap();
+            let file: HerdFile = bincode::deserialize(file).unwrap();
+            prefix.is_empty() || file.prefix.starts_with(&prefix)
+        }));
     tokio::pin!(db_iter);
     while let Some(value) = db_iter.next().await {
         let (key, value) = value.expect("Failed to read database");
@@ -211,7 +215,7 @@ async fn indexer(
         if file.status == HerdStatus::UrlProcessed {
             manifest
                 .add(
-                    &file.prefix,
+                    &file.prefix[prefix.len()..],
                     Entry {
                         reference: file.reference.as_ref().unwrap().clone(),
                         metadata: file.metadata.clone(),
