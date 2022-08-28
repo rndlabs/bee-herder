@@ -152,7 +152,17 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         // iterate over the common prefixes and process them
         for c in prefixes(&db, p) {
             let db = db.clone();
-            let ls = ls.clone();
+            let ls = Arc::new(BeeLoadSaver::new(
+                config.bee_api_uri.clone(),
+                bee_api::BeeConfig {
+                    upload: Some(UploadConfig {
+                        stamp: config.bee_postage_batch.clone(),
+                        pin: Some(true),
+                        tag: Some(manifest_tag.uid),
+                        deferred: Some(true),
+                    }),
+                },
+            ));
             let tx = tx.clone();
             let p = p.clone();
             let mut prefix = p.clone();
