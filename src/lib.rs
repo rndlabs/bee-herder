@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use strum::Display;
+use strum_macros::Display;
 use std::collections::BTreeMap;
 use std::error;
 

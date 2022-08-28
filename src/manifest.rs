@@ -9,10 +9,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use mantaray::{
     node::{Fork, Node},
     persist::BeeLoadSaver, Entry,
-    // walker::walk_node,
+    walker::walk_node,
 };
 use sled::Batch;
-use tokio::{sync::mpsc::{self, Sender}, runtime::Builder};
+use tokio::{sync::mpsc::{self, Sender}};
 use tokio_stream::StreamExt;
 use url::Url;
 
@@ -79,18 +79,20 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     // channel to send the number of files to be uploaded to the progress bar
     let (tx, rx) = mpsc::channel::<Result<(Batch, u64)>>(100);
 
+    let pb = ProgressBar::new(num_url_processed as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
+        .progress_chars("#>-"));
+
+
     // a thread to monitor the progress of the indexer
     let monitor_db = db.clone();
+    let monitor_pb = pb.clone();
     handles.push(tokio::spawn(async move {
         // convert rx to a ReceiverStream
+        let pb = monitor_pb;
+        let db = monitor_db;
         let mut rx = tokio_stream::wrappers::ReceiverStream::new(rx);
-
-        let pb = ProgressBar::new(num_url_processed as u64);
-        pb.set_style(ProgressStyle::default_bar()
-            .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap()
-            .progress_chars("#>-"));
-
-        pb.set_message("Building manifest");
 
         // consume the channel
         let mut count: u64 = 0;
@@ -113,7 +115,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
                     bincode::serialize(&(num_syncing + count)).unwrap(),
                 );
 
-                monitor_db.apply_batch(batch).unwrap();
+                db.apply_batch(batch).unwrap();
                 pb.inc(batch_count);
             } else {
                 failed_batches += 1;
@@ -135,7 +137,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             bincode::serialize(&HerdStatus::Syncing).unwrap(),
             bincode::serialize(&(num_syncing + count)).unwrap(),
         );
-        monitor_db
+        db
             .apply_batch(batch)
             .expect("Failed to apply batch");
 
@@ -148,9 +150,9 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     }));
 
     // first use all the hints to process the prefixes
-    for p in &config.parallel_prefixes {
+    for prefix in &config.parallel_prefixes {
         // iterate over the common prefixes and process them
-        for c in prefixes(&db, p) {
+        for shard in prefixes(&db, prefix) {
             let db = db.clone();
             let ls = Arc::new(BeeLoadSaver::new(
                 config.bee_api_uri.clone(),
@@ -164,30 +166,30 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
                 },
             ));
             let tx = tx.clone();
-            let p = p.clone();
-            let mut prefix = p.clone();
-            prefix.push(c.into());
+            let prefix = prefix.clone();
             let batch_size = config.batch_size.clone();
             parallel_handles.push(tokio::task::spawn(async move {
-                let root = indexer(&db, prefix.clone(), batch_size, ls, tx).await.unwrap();
+                let root = indexer(&db, prefix.clone(), Some(shard), batch_size, ls, tx).await.unwrap();
                 // println!("prefix: {} c: {} ref: {:?}", prefix, c, hex::encode(&root));
-                (p, c, root)
+                (prefix, shard, root)
             }));
         }
     }
 
+    pb.set_message("Building manifest");
+
     // wait for all the parallel prefixes to finish
     let mut parallel_results: HashMap<String, BTreeMap<u8, Vec<u8>>> = HashMap::new();
     for handle in parallel_handles {
-        let (hint, common_prefix, ref_) = handle.await.unwrap();
-        let map = parallel_results.entry(hint).or_insert(BTreeMap::new());
-        map.insert(common_prefix, ref_);
+        let (prefix, shard, ref_) = handle.await.unwrap();
+        let map = parallel_results.entry(prefix).or_insert(BTreeMap::new());
+        map.insert(shard, ref_);
     }
 
     // use a single thread to process the remaining prefixes
     let batch_size = config.batch_size.clone();
     handles.push(tokio::spawn(async move {
-        let root = indexer(&db, "".to_string(), batch_size, ls.clone(), tx).await.unwrap();
+        let root = indexer(&db, "".to_string(), None, batch_size, ls.clone(), tx).await.unwrap();
         let mut manifest =
             mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap();
 
@@ -204,48 +206,50 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         let trie = &mut manifest.trie;
 
         // iterate over the remaining prefixes and process them
-        for hint in parallel_results.keys() {
+        for prefix in parallel_results.keys() {
             // create the node (entry should be nil)
             trie.add(
-                hint.as_bytes(),
+                prefix.as_bytes(),
                 &Vec::new(),
                 BTreeMap::new(),
                 &mut Some(Box::new(ls.clone())),
             )
             .await
             .unwrap();
-            let node = trie
-                .lookup_node(hint.as_bytes(), &mut Some(Box::new(ls.clone())))
+            let nn = trie
+                .lookup_node(prefix.as_bytes(), &mut Some(Box::new(ls.clone())))
                 .await
                 .unwrap();
 
             let parallel_results_iter =
-                tokio_stream::iter(parallel_results.get(hint).unwrap().iter());
+                tokio_stream::iter(parallel_results.get(prefix).unwrap().iter());
             tokio::pin!(parallel_results_iter);
 
-            while let Some((common_prefix, ref_)) = parallel_results_iter.next().await {
+            while let Some((shard, ref_)) = parallel_results_iter.next().await {
                 // println!(
                 //     "Attempting to add forks from root manifest {} for prefix {}",
                 //     hex::encode(ref_),
                 //     String::from_utf8(vec![*common_prefix]).unwrap()
                 // );
                 // lookup the node for the common prefix
-                let mut n = Node::new_node_ref(ref_);
-                n.load(&mut Some(Box::new(ls.clone()))).await.unwrap();
-                n.entry = vec![];
-                // println!("{}", n.to_string());
+                let mut ppn = Node::new_node_ref(ref_);
+                ppn.load(&mut Some(Box::new(ls.clone()))).await.unwrap();
 
-                node.forks.insert(
-                    *common_prefix,
-                    Fork {
-                        prefix: vec![*common_prefix],
-                        node: n,
-                    },
-                );
+                // confirm number of forks is correct
+                assert_eq!(ppn.forks.len(), 1);
+                let fork = ppn.forks.get(&prefix.as_bytes()[0]).unwrap();
+                let mut n = Node::new_node_ref(&fork.node.ref_);
+                n.load(&mut Some(Box::new(ls.clone()))).await.unwrap();
+
+                // add all the forks to the new node
+                // for (shard, node) in n.forks {
+                //     nn.forks.insert(shard, node);
+                // }
+                nn.forks.insert(*shard, n.forks.get(shard).unwrap().clone());
             }
 
-            node.make_edge();
-            node.make_not_value();
+            nn.make_edge();
+            nn.make_not_value();
             // println!("{}", node.to_string());
         }
 
@@ -258,7 +262,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             &manifest_tag.uid
         );
 
-        // walk_node(vec![], &mut Some(Box::new(ls.clone())), &mut manifest.trie);
+        // walk_node(vec![], &mut Some(Box::new(ls.clone())), &mut manifest.trie).await.unwrap();
 
         println!("{}", manifest.trie.to_string());
     }));
@@ -274,14 +278,15 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 async fn indexer(
     db: &sled::Db,
     prefix: String,
+    shard: Option<u8>,
     batch_size: usize,
     ls: Arc<BeeLoadSaver>,
     tx: Sender<std::result::Result<(Batch, u64), Box<dyn std::error::Error + Send>>>,
 ) -> Result<Vec<u8>> {
     // create a manifest root key for this prefix
-    let manifest_key = match prefix.as_str() == "" {
-        false => format!("manifest_root_{}", prefix),
-        true => "manifest_root".to_string(),
+    let manifest_key = match shard {
+        Some(shard) => format!("manifest_root_{}{}", prefix, shard),
+        None => "manifest_root".to_string(),
     };
 
     // if the manifest_root is set in the database, use that as the root for the manifest
@@ -290,16 +295,38 @@ async fn indexer(
             let root: Vec<u8> = bincode::deserialize(&root).unwrap();
             mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap()
         }
-        _ => mantaray::Manifest::new(Box::new(ls.clone()), false),
+        _ => {
+            // create a new manifest root
+            let mut root = mantaray::Manifest::new(Box::new(ls.clone()), false);
+            if shard.is_some() {
+                // create a node for the prefix
+                root.trie.add(
+                    prefix.as_bytes(),
+                    &Vec::new(),
+                    BTreeMap::new(),
+                    &mut Some(Box::new(ls.clone())),
+                ).await?;
+                let n = root.trie
+                    .lookup_node(prefix.as_bytes(), &mut Some(Box::new(ls.clone())))
+                    .await?;
+                n.make_edge();
+            }
+            root
+        }
     };
 
     let mut count = 0;
     let mut count_in_batch = 0;
     let mut batch = sled::Batch::default();
+    // create prefix appending shard to the end of prefix
+    let prefix = format!("{}{}", prefix, match shard {
+        Some(shard) => String::from_utf8([shard].to_vec()).unwrap(),
+        None => "".to_string(),
+    });
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()).filter(|item| {
         let (_, file) = item.as_ref().unwrap();
         let file: HerdFile = bincode::deserialize(file).unwrap();
-        prefix.is_empty() || file.prefix.starts_with(&prefix)
+        file.prefix.starts_with(&prefix) || prefix.is_empty()
     }));
     tokio::pin!(db_iter);
     while let Some(value) = db_iter.next().await {
@@ -309,7 +336,7 @@ async fn indexer(
         if file.status == HerdStatus::UrlProcessed {
             manifest
                 .add(
-                    &file.prefix[prefix.len()..],
+                    &file.prefix,
                     Entry {
                         reference: file.reference.as_ref().unwrap().clone(),
                         metadata: file.metadata.clone(),
@@ -343,6 +370,12 @@ async fn indexer(
     manifest.store().await.unwrap();
     // println!("Processed {} items in root: {} for prefix: {}", count, hex::encode(&manifest.trie.ref_), prefix);
 
+    // if shard.is_some() {
+    //     walk_node(vec![], &mut Some(Box::new(ls.clone())), &mut manifest.trie).await.unwrap();
+    //     println!("{}", manifest.trie.to_string());
+    //     panic!();    
+    // }
+
     // set the manifest root in the database
     batch.insert(
         bincode::serialize(&manifest_key).unwrap(),
@@ -368,10 +401,20 @@ fn prefixes(db: &sled::Db, common: &String) -> Vec<u8> {
         })
         .filter(|file| file.prefix.starts_with(common));
 
+    let mut i = 0;
     for f in iter {
+        // if f.prefix length is the same as common.len() then panic
+        if f.prefix.as_bytes().len() == common.len() {
+            panic!("Prefix at {:?} is the same length as common", f);
+        }
         let first_char = f.prefix.as_bytes()[common.len()];
         let count = prefixes.entry(first_char as u8).or_insert(0);
         *count += 1;
+        i += 1;
+
+        if i % 100000 == 0 {
+            println!("Processed {} prefixes", i);
+        }
     }
 
     // return the keys as a vector
