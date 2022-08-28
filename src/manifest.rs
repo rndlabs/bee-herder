@@ -1,13 +1,12 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc,
-    vec,
+    sync::Arc
 };
 
 use bee_api::UploadConfig;
 use indicatif::{ProgressBar, ProgressStyle};
 use mantaray::{
-    node::{Fork, Node},
+    node::Node,
     persist::BeeLoadSaver, Entry,
     walker::walk_node,
 };
@@ -167,7 +166,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             ));
             let tx = tx.clone();
             let prefix = prefix.clone();
-            let batch_size = config.batch_size.clone();
+            let batch_size = config.batch_size;
             parallel_handles.push(tokio::task::spawn(async move {
                 let root = indexer(&db, prefix.clone(), Some(shard), batch_size, ls, tx).await.unwrap();
                 // println!("prefix: {} c: {} ref: {:?}", prefix, c, hex::encode(&root));
@@ -187,7 +186,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     }
 
     // use a single thread to process the remaining prefixes
-    let batch_size = config.batch_size.clone();
+    let batch_size = config.batch_size;
     handles.push(tokio::spawn(async move {
         let root = indexer(&db, "".to_string(), None, batch_size, ls.clone(), tx).await.unwrap();
         let mut manifest =

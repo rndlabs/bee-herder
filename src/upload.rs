@@ -60,6 +60,7 @@ pub async fn run(config: &Upload) -> Result<()> {
                     batch.insert(key, value);
                 }
                 Err(e) => {
+                    eprintln!("{}", e);
                     failed += 1;
                 }
             }
@@ -113,7 +114,7 @@ pub async fn run(config: &Upload) -> Result<()> {
             failed,
             start.elapsed().as_secs()
         ));
-        print!("\n");
+        println!();
     }));
 
     let uploader_db = db.clone();
