@@ -62,7 +62,6 @@ pub async fn run(config: &Upload) -> Result<()> {
                     batch.insert(key, value);
                 }
                 Err(e) => {
-                    println!("{}", e);
                     failed += 1;
                 }
             }
@@ -116,6 +115,7 @@ pub async fn run(config: &Upload) -> Result<()> {
             failed,
             start.elapsed().as_secs()
         ));
+        print!("\n");
     }));
 
     let uploader_db = db.clone();
@@ -144,21 +144,10 @@ pub async fn run(config: &Upload) -> Result<()> {
                     let (key, value) = item.expect("Failed to read database");
                     let file: HerdFile =
                         bincode::deserialize(&value).expect("Failed to deserialize");
-                    // decode the key as a string and strip the first two characters
-                    // let key_u32 = String::from_utf8(key.to_vec()).expect("Failed to decode key");
-                    // let key_u32 = key_u32[offset..].to_string().parse::<u32>().unwrap();
                     (file, key)
                 })
                 // decode key as u32 and filter out files that have already been uploaded
-                .filter(|(file, _)| {
-                    file.status == HerdStatus::Tagged
-                        // && key_u32 % node_count == idx
-                        && file
-                            .metadata
-                            .get("Content-Type")
-                            .map(|ct| ct != "application/octet-stream+xapian") // TODO: Filter at wiki_extractor level
-                            .unwrap_or(true)
-                });
+                .filter(|(file, _)| file.status == HerdStatus::Tagged);
 
             // consume the iterator
             while let Some((file, key)) = to_upload.next().await {
@@ -212,7 +201,10 @@ pub async fn run(config: &Upload) -> Result<()> {
         }
     }));
 
-    futures::future::join_all(handles).await;
+    // wait for all handles to finish
+    for handle in handles {
+        handle.await.unwrap();
+    }
 
     // At this point all files have been uploaded, so let's check if there are any files that need to be uploaded
     // again
