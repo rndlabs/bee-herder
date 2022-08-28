@@ -5,7 +5,9 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    console_subscriber::init();
+    console_subscriber::ConsoleLayer::builder()
+        .server_addr(([0,0,0,0], 5555))
+        .init();
 
     let cli = Cli::parse();
 
