@@ -24,8 +24,7 @@ pub async fn run(config: &Upload) -> Result<()> {
         tagger(&db, &client, config).await?;
     }
 
-    // read current number of pending entries
-    let num_pending = get_num(&db, HerdStatus::Pending);
+    // read current number of tagged / uploaded entries
     let num_tagged = get_num(&db, HerdStatus::Tagged);
     let num_uploaded = get_num(&db, HerdStatus::Uploaded);
 
@@ -52,8 +51,7 @@ pub async fn run(config: &Upload) -> Result<()> {
         // prepare a batch for writing to the database to minimise IOPS
         let mut batch = sled::Batch::default();
         // consume the channel
-        let mut count = 0;
-        let mut failed = 0;
+        let (mut count, mut failed) = (0, 0);
         while let Some(result) = rx.next().await {
             match result {
                 Ok((file, key)) => {
