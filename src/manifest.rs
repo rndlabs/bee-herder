@@ -8,8 +8,8 @@ use bee_api::UploadConfig;
 use indicatif::{ProgressBar, ProgressStyle};
 use mantaray::{
     node::{Fork, Node},
-    persist::BeeLoadSaver,
-    Entry,
+    persist::BeeLoadSaver, Entry,
+    // walker::walk_node,
 };
 use sled::Batch;
 use tokio::sync::mpsc::{self, Sender};
@@ -211,10 +211,11 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             tokio::pin!(parallel_results_iter);
 
             while let Some((common_prefix, ref_)) = parallel_results_iter.next().await {
-                println!(
-                    "Attempting to add forks from root manifest {}",
-                    hex::encode(ref_)
-                );
+                // println!(
+                //     "Attempting to add forks from root manifest {} for prefix {}",
+                //     hex::encode(ref_),
+                //     String::from_utf8(vec![*common_prefix]).unwrap()
+                // );
                 // lookup the node for the common prefix
                 let mut n = Node::new_node_ref(ref_);
                 n.load(&mut Some(Box::new(ls.clone()))).await.unwrap();
@@ -232,7 +233,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
             node.make_edge();
             node.make_not_value();
-            println!("{}", node.to_string());
+            // println!("{}", node.to_string());
         }
 
         // save the manifest trie
@@ -243,6 +244,9 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             hex::encode(&root),
             &manifest_tag.uid
         );
+
+        // walk_node(vec![], &mut Some(Box::new(ls.clone())), &mut manifest.trie);
+
         println!("{}", manifest.trie.to_string());
     }));
 
@@ -321,8 +325,9 @@ async fn indexer(
             }
         }
     }
+
     manifest.store().await.unwrap();
-    // println!("Indexer: {}", manifest.trie.to_string());
+    // println!("Processed {} items in root: {} for prefix: {}", count, hex::encode(&manifest.trie.ref_), prefix);
 
     // set the manifest root in the database
     batch.insert(
