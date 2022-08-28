@@ -169,7 +169,7 @@ pub async fn run(config: &Upload) -> Result<()> {
 
                 // upload the file to the swarm
                 let hash = bee_api::bytes_post(
-                    client.clone(),
+                    &client,
                     config.bee_api_uri.clone(),
                     data,
                     &UploadConfig {

@@ -15,7 +15,7 @@ use tokio::{sync::mpsc::{self, Sender}};
 use tokio_stream::StreamExt;
 use url::Url;
 
-use crate::{get_num, HerdFile, HerdStatus, Result, FILE_PREFIX};
+use crate::{get_num, HerdFile, HerdStatus, Result, FILE_PREFIX, SemaphoreLoaderSaver};
 
 pub async fn run(config: &crate::Manifest) -> Result<()> {
     // log the start time of the upload
@@ -74,6 +74,11 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             }),
         },
     ));
+
+    let sls = SemaphoreLoaderSaver {
+        loadersaver: ls.clone(),
+        semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+    };
 
     // channel to send the number of files to be uploaded to the progress bar
     let (tx, rx) = mpsc::channel::<Result<(Batch, u64)>>(100);
@@ -153,22 +158,25 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         // iterate over the common prefixes and process them
         for shard in prefixes(&db, prefix) {
             let db = db.clone();
-            let ls = Arc::new(BeeLoadSaver::new(
-                config.bee_api_uri.clone(),
-                bee_api::BeeConfig {
-                    upload: Some(UploadConfig {
-                        stamp: config.bee_postage_batch.clone(),
-                        pin: Some(true),
-                        tag: Some(manifest_tag.uid),
-                        deferred: Some(true),
-                    }),
-                },
-            ));
+            // let ls = Arc::new(BeeLoadSaver::new(
+            //     config.bee_api_uri.clone(),
+            //     bee_api::BeeConfig {
+            //         upload: Some(UploadConfig {
+            //             stamp: config.bee_postage_batch.clone(),
+            //             pin: Some(true),
+            //             tag: Some(manifest_tag.uid),
+            //             deferred: Some(true),
+            //         }),
+            //     },
+            // ));
             let tx = tx.clone();
             let prefix = prefix.clone();
             let batch_size = config.batch_size;
+            let sls = sls.clone();
             parallel_handles.push(tokio::task::spawn(async move {
-                let root = indexer(&db, prefix.clone(), Some(shard), batch_size, ls, tx).await.unwrap();
+                let permit = sls.semaphore.acquire().await.unwrap();
+                let root = indexer(&db, prefix.clone(), Some(shard), batch_size, sls.loadersaver, tx).await.unwrap();
+                drop(permit);
                 // println!("prefix: {} c: {} ref: {:?}", prefix, c, hex::encode(&root));
                 (prefix, shard, root)
             }));

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use strum_macros::Display;
 use std::collections::BTreeMap;
 use std::error;
+use std::sync::Arc;
 
 use strum_macros::EnumIter;
 
@@ -150,6 +151,12 @@ pub struct Migrate {
 pub struct Db {
     #[clap(long, value_parser, help = "Sets the path to the database to use")]
     db: String,
+}
+
+#[derive(Clone)]
+pub struct SemaphoreLoaderSaver<T> {
+    pub loadersaver: T,
+    pub semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 // a function that takes a database and returns a specific key as a number or 0 if it does not exist
