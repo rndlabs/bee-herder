@@ -25,7 +25,8 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
     // read current number of uploaded entries, and if there are no uploading files, return
     let num_uploaded = get_num(&db, HerdStatus::Uploaded);
-    if num_uploaded == 0 {
+    let num_url_processed = get_num(&db, HerdStatus::UrlProcessed);
+    if (num_uploaded + num_url_processed) == 0 {
         println!("No files to index");
         return Ok(());
     }
@@ -156,8 +157,9 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             let p = p.clone();
             let mut prefix = p.clone();
             prefix.push(c.into());
+            let batch_size = config.batch_size.clone();
             parallel_handles.push(tokio::spawn(async move {
-                let root = indexer(&db, prefix.clone(), ls, tx).await.unwrap();
+                let root = indexer(&db, prefix.clone(), batch_size, ls, tx).await.unwrap();
                 // println!("prefix: {} c: {} ref: {:?}", prefix, c, hex::encode(&root));
                 (p, c, root)
             }));
@@ -173,8 +175,9 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     }
 
     // use a single thread to process the remaining prefixes
+    let batch_size = config.batch_size.clone();
     handles.push(tokio::spawn(async move {
-        let root = indexer(&db, "".to_string(), ls.clone(), tx).await.unwrap();
+        let root = indexer(&db, "".to_string(), batch_size, ls.clone(), tx).await.unwrap();
         let mut manifest =
             mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap();
 
@@ -261,6 +264,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 async fn indexer(
     db: &sled::Db,
     prefix: String,
+    batch_size: usize,
     ls: Arc<BeeLoadSaver>,
     tx: Sender<std::result::Result<(Batch, u64), Box<dyn std::error::Error + Send>>>,
 ) -> Result<Vec<u8>> {
@@ -307,7 +311,7 @@ async fn indexer(
             batch.insert(key, bincode::serialize(&file).unwrap());
             count += 1;
             count_in_batch += 1;
-            if count % 500 == 0 {
+            if count % batch_size == 0 {
                 manifest.store().await.unwrap();
                 let ref_ = manifest.trie.ref_;
                 manifest =

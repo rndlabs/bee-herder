@@ -128,6 +128,8 @@ pub struct Manifest {
         help = "Which postage batch to use for uploading"
     )]
     bee_postage_batch: String,
+    #[clap(value_parser, help = "Batch size in indexer")]
+    batch_size: usize,
     #[clap(value_parser, help = "Prefices that should be parallelized")]
     parallel_prefixes: Vec<String>,
 }
