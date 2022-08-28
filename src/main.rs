@@ -5,6 +5,8 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    console_subscriber::init();
+
     let cli = Cli::parse();
 
     let res = match &cli.subcommand {
