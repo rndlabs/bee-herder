@@ -1,11 +1,16 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc, vec,
+    sync::Arc,
+    vec,
 };
 
 use bee_api::UploadConfig;
 use indicatif::{ProgressBar, ProgressStyle};
-use mantaray::{persist::BeeLoadSaver, Entry, node::{Node, Fork}};
+use mantaray::{
+    node::{Fork, Node},
+    persist::BeeLoadSaver,
+    Entry,
+};
 use sled::Batch;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::StreamExt;
@@ -188,21 +193,41 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         // iterate over the remaining prefixes and process them
         for hint in parallel_results.keys() {
             // create the node (entry should be nil)
-            trie.add(&hint.as_bytes(), &Vec::new(), BTreeMap::new(), &mut Some(Box::new(ls.clone()))).await.unwrap();
-            let node = trie.lookup_node(hint.as_bytes(), &mut Some(Box::new(ls.clone()))).await.unwrap();
+            trie.add(
+                hint.as_bytes(),
+                &Vec::new(),
+                BTreeMap::new(),
+                &mut Some(Box::new(ls.clone())),
+            )
+            .await
+            .unwrap();
+            let node = trie
+                .lookup_node(hint.as_bytes(), &mut Some(Box::new(ls.clone())))
+                .await
+                .unwrap();
 
-            let parallel_results_iter = tokio_stream::iter(parallel_results.get(hint).unwrap().iter());
+            let parallel_results_iter =
+                tokio_stream::iter(parallel_results.get(hint).unwrap().iter());
             tokio::pin!(parallel_results_iter);
 
             while let Some((common_prefix, ref_)) = parallel_results_iter.next().await {
-                println!("Attempting to add forks from root manifest {}", hex::encode(ref_));
+                println!(
+                    "Attempting to add forks from root manifest {}",
+                    hex::encode(ref_)
+                );
                 // lookup the node for the common prefix
                 let mut n = Node::new_node_ref(ref_);
                 n.load(&mut Some(Box::new(ls.clone()))).await.unwrap();
                 n.entry = vec![];
                 // println!("{}", n.to_string());
 
-                node.forks.insert(*common_prefix, Fork { prefix: vec![*common_prefix], node: n });
+                node.forks.insert(
+                    *common_prefix,
+                    Fork {
+                        prefix: vec![*common_prefix],
+                        node: n,
+                    },
+                );
             }
 
             node.make_edge();
@@ -253,12 +278,11 @@ async fn indexer(
     let mut count = 0;
     let mut count_in_batch = 0;
     let mut batch = sled::Batch::default();
-    let db_iter =
-        tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()).filter(|item| {
-            let (_, file) = item.as_ref().unwrap();
-            let file: HerdFile = bincode::deserialize(file).unwrap();
-            prefix.is_empty() || file.prefix.starts_with(&prefix)
-        }));
+    let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()).filter(|item| {
+        let (_, file) = item.as_ref().unwrap();
+        let file: HerdFile = bincode::deserialize(file).unwrap();
+        prefix.is_empty() || file.prefix.starts_with(&prefix)
+    }));
     tokio::pin!(db_iter);
     while let Some(value) = db_iter.next().await {
         let (key, value) = value.expect("Failed to read database");
