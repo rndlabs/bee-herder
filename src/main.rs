@@ -1,6 +1,6 @@
 use std::{error::Error, process};
 
-use bee_herder::{import, manifest, migrate, upload, Cli, Commands};
+use bee_herder::{import, manifest, migrate, upload, db, Cli, Commands};
 use clap::Parser;
 
 #[tokio::main]
@@ -12,6 +12,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Upload(upload) => upload::run(upload).await,
         Commands::Manifest(manifest) => crate::manifest::run(manifest).await,
         Commands::Migrate(migrate) => migrate::run(migrate).await,
+        Commands::Db(db) => db::run(db).await,
     };
 
     // run the program

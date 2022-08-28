@@ -1,8 +1,12 @@
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use strum::Display;
 use std::collections::BTreeMap;
 use std::error;
 
+use strum_macros::EnumIter;
+
+pub mod db;
 pub mod import;
 pub mod manifest;
 pub mod migrate;
@@ -12,7 +16,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn error::Error + Send>>;
 
 const FILE_PREFIX: &str = "f_";
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, EnumIter, Display, Clone)]
 pub enum HerdStatus {
     Pending,
     Tagged,
@@ -66,6 +70,8 @@ pub enum Commands {
     Manifest(Manifest),
     /// Migrate the database to the new format
     Migrate(Migrate),
+    /// Database maintenance
+    Db(Db),
 }
 
 #[derive(Args)]
@@ -136,6 +142,12 @@ pub struct Manifest {
 
 #[derive(Args)]
 pub struct Migrate {
+    #[clap(long, value_parser, help = "Sets the path to the database to use")]
+    db: String,
+}
+
+#[derive(Args)]
+pub struct Db {
     #[clap(long, value_parser, help = "Sets the path to the database to use")]
     db: String,
 }
