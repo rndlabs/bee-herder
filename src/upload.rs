@@ -86,7 +86,7 @@ pub async fn run(config: &Upload) -> Result<()> {
         }
 
         // write the final batch
-        if num_pending - count > 0 {
+        if num_tagged - count > 0 {
             batch.insert(
                 bincode::serialize(&HerdStatus::Tagged).unwrap(),
                 bincode::serialize(&(num_tagged - count)).unwrap(),
