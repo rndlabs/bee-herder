@@ -454,7 +454,13 @@ fn url_to_ascii(db: &sled::Db) {
     for (mut file, key) in db_iter {
         let mut url: String = String::from("http://bee.org/");
         url.push_str(&file.prefix);
-        file.prefix = Url::parse(&url).unwrap().path().to_string()[1..].to_string();
+        let url = Url::parse(&url).unwrap();
+        file.prefix = match url.query() {
+            Some(query) => {
+                format!("{}%3F{}", url.path().to_string()[1..].to_string(), query.to_string())
+            }
+            None => url.path().to_string()[1..].to_string(),
+        };
         file.status = HerdStatus::UrlProcessed;
         batch.insert(key, bincode::serialize(&file).unwrap());
         count += 1;
