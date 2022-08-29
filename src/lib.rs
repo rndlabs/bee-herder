@@ -137,6 +137,10 @@ pub struct Manifest {
     bee_postage_batch: String,
     #[clap(value_parser, help = "Batch size in indexer")]
     batch_size: usize,
+    #[clap(value_parser, help = "Number of simultaneous uploaders")]
+    upload_count: usize,
+    #[clap(value_parser, help = "Channel buffer size in indexer")]
+    channels: usize,
     #[clap(value_parser, help = "Prefices that should be parallelized")]
     parallel_prefixes: Vec<String>,
 }

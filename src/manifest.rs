@@ -77,11 +77,11 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
     let sls = SemaphoreLoaderSaver {
         loadersaver: ls.clone(),
-        semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+        semaphore: Arc::new(tokio::sync::Semaphore::new(config.upload_count)),
     };
 
     // channel to send the number of files to be uploaded to the progress bar
-    let (tx, rx) = mpsc::channel::<Result<(Batch, u64)>>(100);
+    let (tx, rx) = mpsc::channel::<Result<(Batch, u64)>>(config.channels);
 
     let pb = ProgressBar::new(num_url_processed as u64);
     pb.set_style(ProgressStyle::default_bar()
