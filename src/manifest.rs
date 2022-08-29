@@ -153,31 +153,28 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         ));
     }));
 
+
+    let mut to_process: HashMap<String, Vec<u8>> = HashMap::new();
+    
+
     // first use all the hints to process the prefixes
     for prefix in &config.parallel_prefixes {
         // iterate over the common prefixes and process them
-        for shard in prefixes(&db, prefix) {
+        to_process.insert(prefix.clone(), prefixes(&db, prefix));
+    }
+
+    // now process the hints in parallel
+    for (prefix, shards) in to_process {
+        let batch_size = config.batch_size;
+        for shard in shards {
             let db = db.clone();
-            // let ls = Arc::new(BeeLoadSaver::new(
-            //     config.bee_api_uri.clone(),
-            //     bee_api::BeeConfig {
-            //         upload: Some(UploadConfig {
-            //             stamp: config.bee_postage_batch.clone(),
-            //             pin: Some(true),
-            //             tag: Some(manifest_tag.uid),
-            //             deferred: Some(true),
-            //         }),
-            //     },
-            // ));
             let tx = tx.clone();
-            let prefix = prefix.clone();
-            let batch_size = config.batch_size;
             let sls = sls.clone();
+            let prefix = prefix.clone();
             parallel_handles.push(tokio::task::spawn(async move {
                 let permit = sls.semaphore.acquire().await.unwrap();
-                let root = indexer(&db, prefix.clone(), Some(shard), batch_size, sls.loadersaver, tx).await.unwrap();
+                let root = indexer(&db, &prefix, Some(shard), batch_size, sls.loadersaver, tx).await.unwrap();
                 drop(permit);
-                // println!("prefix: {} c: {} ref: {:?}", prefix, c, hex::encode(&root));
                 (prefix, shard, root)
             }));
         }
