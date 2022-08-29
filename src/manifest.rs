@@ -193,7 +193,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
     // use a single thread to process the remaining prefixes
     let batch_size = config.batch_size;
     handles.push(tokio::spawn(async move {
-        let root = indexer(&db, "".to_string(), None, batch_size, ls.clone(), tx).await.unwrap();
+        let root = indexer(&db, &"".to_string(), None, batch_size, ls.clone(), tx).await.unwrap();
         let mut manifest =
             mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap();
 
@@ -281,7 +281,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
 async fn indexer(
     db: &sled::Db,
-    prefix: String,
+    prefix: &String,
     shard: Option<u8>,
     batch_size: usize,
     ls: Arc<BeeLoadSaver>,
@@ -328,9 +328,11 @@ async fn indexer(
         None => "".to_string(),
     });
     let db_iter = tokio_stream::iter(db.scan_prefix(FILE_PREFIX.as_bytes()).filter(|item| {
-        let (_, file) = item.as_ref().unwrap();
-        let file: HerdFile = bincode::deserialize(file).unwrap();
-        file.prefix.starts_with(&prefix) || prefix.is_empty()
+        if prefix.is_empty() {
+            return true;
+        } else {
+            bincode::deserialize::<HerdFile>(&item.as_ref().unwrap().1).unwrap().prefix.starts_with(&prefix)
+        }
     }));
     tokio::pin!(db_iter);
     while let Some(value) = db_iter.next().await {
@@ -354,7 +356,7 @@ async fn indexer(
             count_in_batch += 1;
             if count % batch_size == 0 {
                 manifest.store().await.unwrap();
-                let ref_ = manifest.trie.ref_;
+                let ref_ = manifest.trie.ref_.clone();
                 manifest =
                     mantaray::Manifest::new_manifest_reference(ref_.clone(), Box::new(ls.clone()))
                         .unwrap();
