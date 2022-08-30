@@ -173,7 +173,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
             let prefix = prefix.clone();
             parallel_handles.push(tokio::task::spawn(async move {
                 let permit = sls.semaphore.acquire().await.unwrap();
-                let root = indexer(&db, &prefix, Some(shard), batch_size, sls.loadersaver, tx).await.unwrap();
+                let root = indexer(&db, &None, &prefix, Some(shard), batch_size, sls.loadersaver, tx).await.unwrap();
                 drop(permit);
                 (prefix, shard, root)
             }));
@@ -192,17 +192,28 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
     // use a single thread to process the remaining prefixes
     let batch_size = config.batch_size;
+    let website_index = config.website_index.clone();
+    let website_error = config.website_error.clone();
+    let merge_manifest = config.merge_manifest.clone();
     handles.push(tokio::spawn(async move {
-        let root = indexer(&db, &"".to_string(), None, batch_size, ls.clone(), tx).await.unwrap();
+        let root = indexer(&db, &merge_manifest, &"".to_string(), None, batch_size, ls.clone(), tx).await.unwrap();
         let mut manifest =
             mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap();
 
         // set metadata
         let mut metadata = BTreeMap::new();
-        metadata.insert(
-            String::from("website-index-document"),
-            String::from("index.html"),
-        );
+        if let Some(index) = website_index {
+            metadata.insert(
+                String::from("website-index-document"),
+                String::from(index),
+            );
+        }
+        if let Some(error) = website_error {
+            metadata.insert(
+                String::from("website-error-document"),
+                String::from(error),
+            );
+        }
 
         manifest.set_root(metadata).await.unwrap();
 
@@ -281,6 +292,7 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
 
 async fn indexer(
     db: &sled::Db,
+    merge_manifest: &Option<String>,
     prefix: &String,
     shard: Option<u8>,
     batch_size: usize,
@@ -294,29 +306,32 @@ async fn indexer(
     };
 
     // if the manifest_root is set in the database, use that as the root for the manifest
-    let mut manifest = match db.get(manifest_key.as_bytes()) {
-        Ok(Some(root)) => {
-            let root: Vec<u8> = bincode::deserialize(&root).unwrap();
-            mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap()
-        }
-        _ => {
-            // create a new manifest root
-            let mut root = mantaray::Manifest::new(Box::new(ls.clone()), false);
-            if shard.is_some() {
-                // create a node for the prefix
-                root.trie.add(
-                    prefix.as_bytes(),
-                    &Vec::new(),
-                    BTreeMap::new(),
-                    &mut Some(Box::new(ls.clone())),
-                ).await?;
-                let n = root.trie
-                    .lookup_node(prefix.as_bytes(), &mut Some(Box::new(ls.clone())))
-                    .await?;
-                n.make_edge();
+    let mut manifest = match merge_manifest {
+        Some(m) => mantaray::Manifest::new_manifest_reference(hex::decode(m).unwrap(), Box::new(ls.clone())).unwrap(),
+        None => match db.get(manifest_key.as_bytes()) {
+            Ok(Some(root)) => {
+                let root: Vec<u8> = bincode::deserialize(&root).unwrap();
+                mantaray::Manifest::new_manifest_reference(root, Box::new(ls.clone())).unwrap()
             }
-            root
-        }
+            _ => {
+                // create a new manifest root
+                let mut root = mantaray::Manifest::new(Box::new(ls.clone()), false);
+                if shard.is_some() {
+                    // create a node for the prefix
+                    root.trie.add(
+                        prefix.as_bytes(),
+                        &Vec::new(),
+                        BTreeMap::new(),
+                        &mut Some(Box::new(ls.clone())),
+                    ).await?;
+                    let n = root.trie
+                        .lookup_node(prefix.as_bytes(), &mut Some(Box::new(ls.clone())))
+                        .await?;
+                    n.make_edge();
+                }
+                root
+            }
+        },
     };
 
     let mut count = 0;

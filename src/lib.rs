@@ -135,12 +135,18 @@ pub struct Manifest {
         help = "Which postage batch to use for uploading"
     )]
     bee_postage_batch: String,
+    #[clap(long, value_parser, help = "Manifest to merge with")]
+    merge_manifest: Option<String>,
     #[clap(value_parser, help = "Batch size in indexer")]
     batch_size: usize,
     #[clap(value_parser, help = "Number of simultaneous uploaders")]
     upload_count: usize,
     #[clap(value_parser, help = "Channel buffer size in indexer")]
     channels: usize,
+    #[clap(value_parser, help = "Website index")]
+    website_index: Option<String>,
+    #[clap(value_parser, help = "Error website return")]
+    website_error: Option<String>,
     #[clap(value_parser, help = "Prefices that should be parallelized")]
     parallel_prefixes: Vec<String>,
 }
