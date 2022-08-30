@@ -17,8 +17,10 @@ reqwest = { version = "0.11.11", features = ["json", "rustls-tls"] }
 serde = { version = "1.0.143", features = ["derive"] }
 tokio = { version = "1.20.1", features = ["full"] }
 tokio-stream = "0.1.9"
-bee_api = { path = "../bee_api" }
-mantaray = { path = "../mantaray" }
+# bee_api = { path = "../bee_api" }
+bee_api = { git = "https://github.com/rndlabs/bee-api-rs.git" }
+#mantaray = { path = "../mantaray" }
+mantaray = { git = "https://github.com/rndlabs/mantaray-rs.git" }
 governor = "0.4.2"
 thiserror = "1.0.32"
 futures = "0.3.23"
