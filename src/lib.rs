@@ -1,3 +1,4 @@
+#![feature(let_chains)]
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use strum_macros::Display;
