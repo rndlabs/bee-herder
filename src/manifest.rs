@@ -271,15 +271,15 @@ pub async fn run(config: &crate::Manifest) -> Result<()> {
         // save the manifest trie
         manifest.store().await.unwrap();
         let root = manifest.trie.ref_.clone();
-        println!(
+        eprintln!(
             "Manifest root uploaded at {:?} with monitoring on tag {}\n\n\n",
             hex::encode(&root),
             &manifest_tag.uid
         );
+        println!("{:?}", hex::encode(&root));
 
         // walk_node(vec![], &mut Some(Box::new(ls.clone())), &mut manifest.trie).await.unwrap();
-
-        println!("{}", manifest.trie.to_string());
+        // println!("{}", manifest.trie.to_string());
     }));
 
     // wait for all handles to finish
@@ -434,7 +434,7 @@ fn prefixes(db: &sled::Db, common: &String) -> Vec<u8> {
         i += 1;
 
         if i % 100000 == 0 {
-            println!("Processed {} prefixes", i);
+            eprintln!("Processed {} prefixes", i);
         }
     }
 
